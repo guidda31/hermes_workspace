@@ -49,6 +49,16 @@ def default_costs() -> ExecutionCostConfig:
     )
 
 
+def stress_costs() -> ExecutionCostConfig:
+    """A harsher scenario: 3x slippage and 2x commission over the base (doc-04 §6)."""
+    return ExecutionCostConfig(
+        buy_slippage_bps=Decimal("30"), sell_slippage_bps=Decimal("30"),
+        buy_commission_bps=Decimal("3"), sell_commission_bps=Decimal("3"),
+        sell_tax_bps_by_asset_type={"STOCK": Decimal("20"), "ETF": Decimal("0")},
+        fixed_fee_per_order=Decimal("0"), tick_rounder=_tick_round,
+    )
+
+
 def default_risk() -> BacktestRiskConfig:
     return BacktestRiskConfig(
         risk_per_position=Decimal("0.01"), max_positions=5,
@@ -81,19 +91,32 @@ def run_backtest_from_snapshot(
     snapshot_path,
     initial_cash: Decimal,
     risk: Optional[BacktestRiskConfig] = None,
+    costs: Optional[ExecutionCostConfig] = None,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
     output_dir=None,
     annualization_days: int = 252,
 ) -> tuple[BacktestResult, BacktestMetrics]:
-    """Run the engine over a snapshot with RESEARCH metadata; return result + metrics."""
+    """Run the engine over a snapshot with RESEARCH metadata; return result + metrics.
+
+    ``costs`` and ``start_date``/``end_date`` may be overridden for cost-stress and
+    walk-forward scenarios; a restricted window still uses the full prior history for
+    its indicators (no lookahead), only its own dates generate trades.
+    """
     snapshot = load_snapshot(snapshot_path)
     data = SnapshotBacktestData(snapshot)
     calendar = tuple(snapshot.trade_calendar)
     if not calendar:
         raise ValueError("snapshot has an empty trade calendar")
+    window_start = calendar[0] if start_date is None else start_date
+    window_end = calendar[-1] if end_date is None else end_date
+    if type(window_start) is not date or type(window_end) is not date or window_start > window_end:
+        raise ValueError("start_date/end_date must be plain ordered dates")
     asset_types = dict(snapshot.asset_types)
     config = BacktestConfig(
-        start_date=calendar[0], end_date=calendar[-1], universe=tuple(sorted(asset_types)),
-        market_symbol=snapshot.market_symbol, initial_cash=initial_cash, costs=default_costs(),
+        start_date=window_start, end_date=window_end, universe=tuple(sorted(asset_types)),
+        market_symbol=snapshot.market_symbol, initial_cash=initial_cash,
+        costs=costs if costs is not None else default_costs(),
         risk=risk if risk is not None else default_risk(),
         universe_metadata=build_research_metadata(asset_types, as_of=calendar[0]),
     )
