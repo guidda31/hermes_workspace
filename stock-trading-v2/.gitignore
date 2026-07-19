@@ -31,5 +31,6 @@ exports/
 *.xlsx
 *.json
 
-# Local-only planning and notes
+# Local-only planning and notes, but keep the versioned design/handoff docs
 *.md
+!docs/*.md
