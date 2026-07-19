@@ -61,13 +61,33 @@ cd stock-trading-v2 && export PYTHONPATH=src
 - 감사기록 덮어쓰기 금지(write-once). 같은 날 재실행은 새 경로.
 - 실거래 활성화는 이 루프 범위 밖 — 별도 명시 승인 필요.
 
-## 루틴/스케줄 등록 (준비됨 — **활성화는 승인 후**)
-현재 자동 cron **비활성**. 매일 자동 실행하려면 아래를 Hermes/OpenClaw 루틴으로 등록한다:
-- **트리거**: KRX 장 마감 후(예: 평일 KST 16:00), 거래일에만.
-- **동작**: 위 0→1→2→3 순서. Hermes 에이전트가 2단계(판단)를 담당.
-- **주간**: 매 금요일 4단계(score) 실행 → 누적 edge 리포트.
-- **가드**: 실패 시 중단·알림. 실주문 절대 없음.
-등록 자체(cron/routine 생성)는 **자율 반복 실행을 시작**하는 행위이므로 사용자 명시 승인 뒤에만 한다.
+## 루틴/스케줄 등록 (준비됨 — **Hermes 쿼터 복구 후 가동**)
+
+### 왜 Hermes 루틴이어야 하나 (OAuth 제약)
+Claude(구독 OAuth)·Hermes(OpenAI OAuth via Codex)는 **API 키가 아니라 OAuth 구독**이라, 일반
+cron으로 LLM을 무인 헤드리스 호출하는 건 부적합하다. **OpenClaw만 Hermes의 OAuth 세션을
+관리해 스케줄 실행**한다 — 그래서 자동화는 반드시 Hermes 네이티브 cron으로 한다. 또한
+클라우드 스케줄러(Claude Code Routines)는 **로컬 KIS 자격증명·`data/`에 접근 못 해 이 파이프라인을
+못 돌린다**(자격증명은 로컬 `.env`, gitignore됨). 로컬 Hermes 런타임만 가능.
+
+### 등록 명령 (준비 — 지금 실행하지 말 것)
+Hermes 쿼터가 살아있을 때 아래를 실행한다. **지금은 쿼터 소진이라 등록하면 매일 실패하므로 대기.**
+```bash
+# 평일 KST 16:00 = UTC 07:00. 거래일 여부·데이터 수집·판단·기록은 프롬프트가 지시.
+hermes cron create "0 7 * * 1-5" \
+  "You are the KRX forward-observation runner. Follow stock-trading-v2/docs/06 exactly. \
+Steps: (0) if today is not an actual KRX trading session (KIS returns no new bars), stop and report. \
+(1) collect the 30-symbol universe + KOSPI up to today via the READ-ONLY kis_snapshot_collector \
+(never order/balance/account endpoints) and rebuild the snapshot. \
+(2) run 'forward_cli render' to get the brief. (3) Decide as the analyst per the brief's JSON schema — \
+cite only provided evidence, PIT only, [] if no action. (4) run 'forward_cli record' to write the \
+immutable signal audit. On any tool error, stop and report. NEVER place an order. \
+On Fridays also run 'forward_cli score' and report the accumulated edge." \
+  --name "krx-forward-observation" --deliver telegram
+```
+- **동작**: 위 0→1→2→3, 금요일 4(score). Hermes가 2단계(판단)를 수행, 로컬 도구가 나머지.
+- **가드**: 실패 시 중단·알림. 실주문 절대 없음. `hermes cron list`로 확인, `hermes cron delete`로 해제.
+- **활성화 시점**: Hermes 쿼터 복구 후. 그 전까지는 위 "매 거래일 절차"를 **수동 트리거**로 실행.
 
 ## 성공 기준 (무엇을 보면 되나)
 - 수개월 누적 후 `score`의 **edge가 유의하게 양(+)** 이면 → Hermes가 규칙이 못 만든 **선별 알파**를
