@@ -24,6 +24,7 @@ from .forward_eval import ForwardObservationReport, evaluate_forward_observation
 from .forward_runner import run_forward_signal
 from .guardrail import GuardrailConfig, PortfolioContext
 from .prompt import parse_agent_response, render_brief_prompt
+from .providers import dart_disclosure_provider_or_none
 from .signal_audit import load_signal_audit
 from .brief import build_brief
 
@@ -44,9 +45,19 @@ def render_from_snapshot(
     held: frozenset[str] = frozenset(),
     new_entries_blocked: bool = False,
     window: int = _DEFAULT_WINDOW,
+    disclosure_provider=None,
+    news_provider=None,
 ) -> str:
-    """Build the brief and render the agent prompt (price-only in v0)."""
-    brief = build_brief(_load_data(snapshot_path), signal_date=signal_date, symbols=symbols, window=window)
+    """Build the brief and render the agent prompt.
+
+    When a ``disclosure_provider`` (e.g. DART) is supplied, point-in-time disclosures
+    appear in the brief so the agent can reason over them, not just price. With no
+    provider the brief stays price-only.
+    """
+    brief = build_brief(
+        _load_data(snapshot_path), signal_date=signal_date, symbols=symbols, window=window,
+        disclosure_provider=disclosure_provider, news_provider=news_provider,
+    )
     return render_brief_prompt(brief, portfolio=PortfolioContext(held, new_entries_blocked))
 
 
@@ -63,8 +74,14 @@ def record_from_snapshot(
     new_entries_blocked: bool = False,
     output_path: Optional[str | Path] = None,
     window: int = _DEFAULT_WINDOW,
+    disclosure_provider=None,
+    news_provider=None,
 ) -> dict:
-    """Rebuild the identical brief, apply the agent reply, and record the signal."""
+    """Rebuild the identical brief, apply the agent reply, and record the signal.
+
+    The same providers used at ``render`` time must be passed here so the recorded
+    brief (and its evidence ids) is identical to what the agent saw.
+    """
     if type(agent_reply) is not str or not agent_reply.strip():
         raise ValueError("agent_reply must be a nonempty str")
     return run_forward_signal(
@@ -78,6 +95,8 @@ def record_from_snapshot(
         decide=lambda brief: parse_agent_response(agent_reply),
         window=window,
         output_path=output_path,
+        disclosure_provider=disclosure_provider,
+        news_provider=news_provider,
     )
 
 
@@ -133,6 +152,8 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--held", default="", type=_frozen_symbols)
     common.add_argument("--new-entries-blocked", action="store_true")
     common.add_argument("--window", default=_DEFAULT_WINDOW, type=int)
+    common.add_argument("--corp-code-cache", default="data/dart-corp-codes.json",
+                        help="local {symbol: corp_code} cache for DART disclosures")
 
     render = sub.add_parser("render", parents=[common], help="print the agent prompt")
 
@@ -152,9 +173,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "render":
+        provider = dart_disclosure_provider_or_none(symbols=args.symbols, cache_path=args.corp_code_cache)
         sys.stdout.write(render_from_snapshot(
             args.snapshot, args.signal_date, args.symbols,
             held=args.held, new_entries_blocked=args.new_entries_blocked, window=args.window,
+            disclosure_provider=provider,
         ))
         return 0
     if args.command == "score":
@@ -169,11 +192,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
         return 0
     reply = sys.stdin.read() if args.reply_file == "-" else Path(args.reply_file).read_text(encoding="utf-8")
+    provider = dart_disclosure_provider_or_none(symbols=args.symbols, cache_path=args.corp_code_cache)
     record = record_from_snapshot(
         args.snapshot, args.signal_date, args.symbols, reply,
         eligible=args.eligible, model_id=args.model_id,
         decided_at=datetime.now(_KST), held=args.held,
         new_entries_blocked=args.new_entries_blocked, output_path=args.output, window=args.window,
+        disclosure_provider=provider,
     )
     sys.stdout.write(
         f"signal_date={record['signal_date']} admitted={record['admitted_symbols']} "

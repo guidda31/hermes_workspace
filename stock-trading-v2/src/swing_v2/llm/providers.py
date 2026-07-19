@@ -10,8 +10,10 @@ chosen before news can be enabled; ``news_provider`` accepts any injected ``fetc
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+import json
 import os
+from pathlib import Path
 from typing import Callable, Optional
 
 from .brief import EvidenceProvider
@@ -77,3 +79,55 @@ def dart_provider_from_env(
 def news_provider(*, fetch, window_days: int = 14) -> EvidenceProvider:
     """Wrap an injected news ``fetch`` (source-agnostic) into an EvidenceProvider."""
     return make_news_provider(fetch=fetch, window_days=window_days)
+
+
+def _optional_dart_key(env: Mapping[str, str]) -> Optional[str]:
+    for name in _DART_ENV_KEYS:
+        value = env.get(name)
+        if value:
+            return value
+    return None
+
+
+def _corp_codes_for(
+    symbols: Sequence[str], *, api_key: str, cache_path, url_opener
+) -> dict[str, str]:
+    """Load the {symbol: corp_code} map from a local cache, else fetch and cache it."""
+    codes: Optional[dict] = None
+    path = Path(cache_path) if cache_path is not None else None
+    if path is not None and path.exists():
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            codes = {str(k): str(v) for k, v in loaded.items()}
+    if codes is None:
+        codes = fetch_corp_codes(api_key=api_key, url_opener=url_opener)
+        if path is not None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(codes, ensure_ascii=False), encoding="utf-8")
+    return {symbol: codes[symbol] for symbol in symbols if symbol in codes}
+
+
+def dart_disclosure_provider_or_none(
+    *,
+    symbols: Sequence[str],
+    env: Optional[Mapping[str, str]] = None,
+    cache_path=None,
+    window_days: int = 60,
+    http_get: Optional[Callable[[str, Mapping[str, str]], Mapping]] = None,
+    url_opener=None,
+) -> Optional[EvidenceProvider]:
+    """Build a DART disclosure provider from the environment, or None if no key.
+
+    Graceful by design: with no OPENDART key the forward brief simply stays price-only.
+    Corp codes are cached at ``cache_path`` so they are not re-fetched every run.
+    """
+    environment = os.environ if env is None else env
+    api_key = _optional_dart_key(environment)
+    if api_key is None:
+        return None
+    corp_codes = _corp_codes_for(symbols, api_key=api_key, cache_path=cache_path, url_opener=url_opener)
+    if not corp_codes:
+        return None
+    return dart_provider(
+        api_key=api_key, corp_code_by_symbol=corp_codes, http_get=http_get, window_days=window_days,
+    )
