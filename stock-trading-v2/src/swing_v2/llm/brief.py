@@ -33,7 +33,9 @@ _KST = timezone(timedelta(hours=9))
 # builder — not the provider — enforces the PIT cutoff, so a provider cannot widen it.
 EvidenceProvider = Callable[[str, date], Sequence["EvidenceItem"]]
 
-_DEFAULT_WINDOW = 60
+# Must exceed the longest indicator lookback: the 60-day return needs 61 closes,
+# so a 60-bar window would leave return_60 permanently None. 120 gives headroom.
+_DEFAULT_WINDOW = 120
 
 
 @dataclass(frozen=True)

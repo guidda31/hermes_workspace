@@ -29,7 +29,8 @@ from .signal_audit import build_signal_audit, write_signal_audit
 # The injected Hermes seam: it receives the built Brief and returns raw decisions.
 DecideFn = Callable[[Brief], Sequence[Mapping]]
 
-_DEFAULT_WINDOW = 60
+# Keep in step with brief._DEFAULT_WINDOW so 60-day indicators are computable.
+_DEFAULT_WINDOW = 120
 
 
 def _require_raw_decisions(raw: object) -> Sequence[Mapping]:
