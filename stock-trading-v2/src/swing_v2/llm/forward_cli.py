@@ -171,6 +171,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    # Load OPENDART_API_KEY (and any local config) from .env, like the KIS collector.
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except ImportError:
+        pass
     args = build_parser().parse_args(argv)
     if args.command == "render":
         provider = dart_disclosure_provider_or_none(symbols=args.symbols, cache_path=args.corp_code_cache)

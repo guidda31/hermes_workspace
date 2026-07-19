@@ -112,6 +112,11 @@ class ParseCorpCodeXmlTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_corp_code_xml(_xml([bad]))
 
+    def test_alphanumeric_stock_code_is_accepted(self):
+        # Real KRX has 6-char alphanumeric codes (e.g. "0068Y0"), not only digits.
+        row = _row(corp_code="00126380", corp_name="특수증권", stock_code="0068Y0")
+        self.assertEqual(parse_corp_code_xml(_xml([row])), {"0068Y0": "00126380"})
+
     def test_duplicate_stock_code_same_corp_code_ok(self):
         mapping = parse_corp_code_xml(_xml([LISTED_SAMSUNG, LISTED_SAMSUNG]))
         self.assertEqual(mapping, {"005930": "00126380"})

@@ -13,8 +13,13 @@ silently skipped; every other anomaly fails closed with ``ValueError``.
 from __future__ import annotations
 
 import io
+import re
 import zipfile
 from xml.etree import ElementTree
+
+# KRX short codes are 6 uppercase-alphanumeric chars — usually digits, but some real
+# listed securities carry a letter (e.g. "0068Y0"). Matches krx_xlsx_normalizer.
+_KRX_SHORT_CODE = re.compile(r"[0-9A-Z]{6}")
 
 
 def parse_corp_code_xml(xml_bytes: bytes) -> dict[str, str]:
@@ -32,8 +37,8 @@ def parse_corp_code_xml(xml_bytes: bytes) -> dict[str, str]:
         stock_code = _text(row, "stock_code")
         if not stock_code:
             continue  # Unlisted company: no stock_code, skip (the vast majority).
-        if len(stock_code) != 6 or not stock_code.isdigit():
-            raise ValueError(f"listed stock_code must be 6 digits, got {stock_code!r}")
+        if not _KRX_SHORT_CODE.fullmatch(stock_code):
+            raise ValueError(f"listed stock_code must be 6 alphanumeric chars, got {stock_code!r}")
         corp_code = _text(row, "corp_code")
         if len(corp_code) != 8 or not corp_code.isdigit():
             raise ValueError(f"corp_code must be 8 digits, got {corp_code!r}")
