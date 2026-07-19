@@ -20,13 +20,16 @@ import sys
 from typing import Optional, Sequence
 
 from ..backtest_data import SnapshotBacktestData, load_snapshot
+from .forward_eval import ForwardObservationReport, evaluate_forward_observations
 from .forward_runner import run_forward_signal
 from .guardrail import GuardrailConfig, PortfolioContext
 from .prompt import parse_agent_response, render_brief_prompt
+from .signal_audit import load_signal_audit
 from .brief import build_brief
 
 _KST = timezone(timedelta(hours=9))
 _DEFAULT_WINDOW = 120
+_DEFAULT_FORWARD_SESSIONS = 5
 
 
 def _load_data(snapshot_path: str | Path) -> SnapshotBacktestData:
@@ -78,6 +81,36 @@ def record_from_snapshot(
     )
 
 
+def score_accumulated_observations(
+    *,
+    records_dir: str | Path,
+    snapshot_path: str | Path,
+    forward_sessions: int = _DEFAULT_FORWARD_SESSIONS,
+) -> ForwardObservationReport:
+    """Score every accumulated signal audit against realized outcomes in the snapshot.
+
+    Reads the integrity-verified audit records from ``records_dir`` and evaluates their
+    admitted picks over the snapshot's realized bars. Records whose forward window has
+    not elapsed in the snapshot are skipped, so this re-runs cleanly as data accrues.
+    """
+    snapshot = load_snapshot(snapshot_path)
+    data = SnapshotBacktestData(snapshot)
+    paths = sorted(Path(records_dir).glob("*.json"))
+    if not paths:
+        raise ValueError(f"no signal-audit records found in {records_dir}")
+    records = [load_signal_audit(path) for path in paths]
+
+    def bar_lookup(symbol, day):
+        if symbol == snapshot.market_symbol:
+            return data.get_market_index_bar(day)
+        return data.get_bars(day).get(symbol)
+
+    return evaluate_forward_observations(
+        records, bar_lookup=bar_lookup, calendar=list(snapshot.trade_calendar),
+        market_symbol=snapshot.market_symbol, forward_sessions=forward_sessions,
+    )
+
+
 def _symbols(value: str) -> tuple[str, ...]:
     parsed = tuple(part.strip() for part in value.split(",") if part.strip())
     if not parsed:
@@ -108,6 +141,11 @@ def build_parser() -> argparse.ArgumentParser:
     record.add_argument("--eligible", required=True, type=_frozen_symbols)
     record.add_argument("--model-id", required=True)
     record.add_argument("--output", default=None)
+
+    score = sub.add_parser("score", help="score accumulated signal audits vs realized outcomes")
+    score.add_argument("--records-dir", required=True)
+    score.add_argument("--snapshot", required=True)
+    score.add_argument("--forward-sessions", type=int, default=_DEFAULT_FORWARD_SESSIONS)
     return parser
 
 
@@ -118,6 +156,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             args.snapshot, args.signal_date, args.symbols,
             held=args.held, new_entries_blocked=args.new_entries_blocked, window=args.window,
         ))
+        return 0
+    if args.command == "score":
+        report = score_accumulated_observations(
+            records_dir=args.records_dir, snapshot_path=args.snapshot,
+            forward_sessions=args.forward_sessions,
+        )
+        sys.stdout.write(
+            f"scored={report.scored_count}/{report.signal_count} hit_rate={report.hit_rate} "
+            f"pick_return={report.mean_pick_return} market_return={report.mean_market_return} "
+            f"edge={report.edge}\n"
+        )
         return 0
     reply = sys.stdin.read() if args.reply_file == "-" else Path(args.reply_file).read_text(encoding="utf-8")
     record = record_from_snapshot(

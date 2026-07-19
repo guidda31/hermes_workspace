@@ -1,58 +1,75 @@
-# Hermes 자율 Forward-Observation 루틴 (신호 전용, 주문 없음)
+# Hermes 자율 Forward-Observation 운용 Runbook (신호 전용, 주문 없음)
 
-> 상태: **운영 규약(runbook)**. 이 루틴은 매 거래일 장 마감 후 Hermes가 스스로 실행한다.
-> 실주문·성과주장은 하지 않는다. Hermes가 두뇌, 저장소 도구가 손발이다(`docs/05` 참조).
+> 상태: **운영 규약 + 루틴 준비**. Hermes가 매 거래일 스스로 실행한다. 실주문·성과주장 없음.
+> Hermes가 두뇌, 저장소 도구가 손발. 이 문서가 실제 forward 운용의 단일 실행 기준이다.
 
-## 목적
-매 실제 거래일에 대해 PIT 브리프를 만들고, Hermes가 판단하고, 하드 가드레일을 거쳐 **불변 신호 감사기록**을 남긴다. 이 기록을 다음날 실제 결과와 대사해 LLM 판단 품질을 축적한다(정직한 검증 경로). 주문은 절대 내지 않는다.
+## 왜 forward observation인가 (핵심)
+backtest의 성과는 **시장 베타 + 생존편향**이 대부분이고, 규칙 momentum의 **종목선별 알파는
+사실상 0**임이 `forward_eval`로 확인됐다(모든 horizon에서 엣지 ≈ 0). 따라서 이 프로젝트의
+진짜 질문은 **"Hermes가 뉴스·공시를 해석해 지수 대비 엣지를 만드는가"** 이고, 그 답은
+**생존편향-free한 forward observation 누적**으로만 나온다. 이 runbook이 그 누적 루프다.
 
-## 선행 조건 (하나라도 불충족 시 중단·보고)
-1. `signal_date`가 **실제 KRX 거래일**이어야 한다(주말·공휴일·비거래일이면 실행 안 함).
-2. `signal_date`까지의 봉을 담은 **로컬 스냅샷**이 있어야 한다. 없으면 먼저 KIS 읽기 전용 수집기로 확보한다(주문·계좌 엔드포인트 금지).
-3. eligibility는 **provenance.as_of ≤ signal_date** 인 KRX 메타데이터로만 판정한다. 과거 구간은 PIT 메타데이터 부재로 막혀 있다(현재 as_of=2026-07-18, forward-only).
+## 안전 불변식
+- **주문 0.** 이 루프는 신호를 기록하고 채점할 뿐, KIS 주문·잔고·계좌변경 API를 호출하지 않는다.
+- **PIT.** `t` 종가까지의 정보만. 공시·뉴스는 발행시각 ≤ `t`. 미래 데이터 금지.
+- 어떤 단계든 도구가 오류를 내면 **중단·보고**(추정 진행 금지).
 
-## 매 거래일 절차 (Hermes가 수행)
+## 매 거래일 절차
 
-### 1. 브리프 렌더
+### 0. 세션 확인 & 데이터 수집 (읽기 전용)
+실제 KRX 거래일에만 실행. `signal_date` = 방금 마감한 세션.
 ```bash
-cd stock-trading-v2
-PYTHONPATH=src .venv/bin/python -m swing_v2.llm.forward_cli render \
-  --snapshot <스냅샷경로> --signal-date <YYYY-MM-DD> \
-  --symbols <종목,종목,...> [--held <보유종목>] [--new-entries-blocked]
+cd stock-trading-v2 && export PYTHONPATH=src
+# 유니버스 30종목 + KOSPI의 signal_date까지 일봉을 수집(재개 가능, 주문 아님)
+.venv/bin/python -m swing_v2.kis_snapshot_collector --symbol 005930:STOCK ... \
+  --start <시작> --end <signal_date> --output data/kis-live/<...> --delay-seconds 0.25
+# 수집분으로 signal_date 기준 스냅샷 재조립 (KOSPI 워밍업 200+세션 포함)
+#   → data/snapshots/live-<signal_date>.json  (조립 스크립트는 universe30 빌드와 동일 방식)
 ```
-출력된 프롬프트를 읽는다.
+
+### 1. 브리프 렌더 (저장소 → Hermes)
+```bash
+.venv/bin/python -m swing_v2.llm.forward_cli render \
+  --snapshot <SNAP> --signal-date <signal_date> --symbols <30종목> [--held <보유>]
+```
+출력 프롬프트를 Hermes가 읽는다. (DART/뉴스는 `OPENDART_API_KEY` 설정 시 `llm/providers.py`로 연결.)
 
 ### 2. 판단 (Hermes 두뇌)
-프롬프트의 규칙을 지켜 **JSON 배열만** 산출한다:
-- 제공된 종목·evidence_id만 사용(환각 인용 금지).
-- BUY는 conviction>0·target_weight>0, SELL은 전량청산(target_weight=0), HOLD/SELL은 보유 종목만.
-- 브리프 밖 정보를 가정하지 않는다(PIT). 조치가 불필요하면 `[]`.
+프롬프트 규칙대로 **JSON 배열만** 산출: 제공된 종목·evidence_id만, BUY는 conviction·target_weight>0,
+브리프 밖 정보 가정 금지(PIT). 조치 불필요 시 `[]`.
 
-### 3. 기록 (가드레일 + 감사)
-Hermes의 JSON을 파일(또는 stdin)로 넘긴다:
+### 3. 신호 기록 (불변 감사)
 ```bash
-PYTHONPATH=src .venv/bin/python -m swing_v2.llm.forward_cli record \
-  --snapshot <스냅샷경로> --signal-date <YYYY-MM-DD> --symbols <...> \
+.venv/bin/python -m swing_v2.llm.forward_cli record \
+  --snapshot <SNAP> --signal-date <signal_date> --symbols <30종목> \
   --eligible <자격종목> --model-id hermes/openai-oauth \
-  --reply-file <hermes응답.json> --output <감사기록경로>.json
+  --reply-file <hermes.json> --output data/forward-records/signal-<signal_date>.json
 ```
-동일 스냅샷+날짜로 **동일 브리프가 재구성**되므로 브리프를 따로 저장할 필요가 없다. 도구가 스키마·환각·유니버스·5종목·단일비중·신규진입차단을 강제하고, 통과분만 불변 기록에 남긴다.
+→ 스키마·환각·유니버스·가드레일 강제 후 통과분만 **write-once** 기록. 주문 필드 0.
 
-### 4. 보고
-`admitted`/`rejected` 요약을 남긴다. **주문은 하지 않는다.**
+### 4. (주기적) 채점 — 누적된 신호가 실제로 맞았나
+며칠~몇 주 뒤 forward 결과가 쌓이면:
+```bash
+.venv/bin/python -m swing_v2.llm.forward_cli score \
+  --records-dir data/forward-records --snapshot <최신 SNAP> --forward-sessions 20
+# 출력: scored/signal, hit_rate, pick_return, market_return, edge
+```
+**edge = 픽수익 − 시장수익.** forward 창이 안 지난 기록은 자동 스킵되므로 반복 실행 가능.
 
-## 안전 가드레일 (Hermes가 반드시 지킴)
-- 비거래일에는 브리프·기록을 만들지 않는다(캘린더/스냅샷 없으면 중단).
-- 어떤 단계든 도구가 오류를 내면 **중단하고 보고**한다(추정으로 진행 금지).
-- KIS **주문·잔고·계좌변경** 엔드포인트를 호출하지 않는다(수집은 읽기 전용만).
-- 감사기록을 덮어쓰지 않는다(write-once). 같은 날 재실행은 새 경로를 쓴다.
-- 실거래 활성화는 이 루틴 범위 밖이며 별도 명시 승인이 필요하다.
+## Hermes가 지켜야 할 가드레일
+- 비거래일엔 실행 안 함. KIS 주문·잔고 엔드포인트 호출 금지(수집은 읽기전용만).
+- 감사기록 덮어쓰기 금지(write-once). 같은 날 재실행은 새 경로.
+- 실거래 활성화는 이 루프 범위 밖 — 별도 명시 승인 필요.
 
-## 스케줄링
-- 현재 **자동 cron 비활성**. 매일 자동 실행은 별도 승인 후 Hermes 루틴/cron으로 등록한다(로드맵 Phase 5 게이트, `.hermes/plans/...forward-observation-and-pit-plan.md`).
-- 그 전까지는 이 절차를 **수동 트리거**로 실행한다.
+## 루틴/스케줄 등록 (준비됨 — **활성화는 승인 후**)
+현재 자동 cron **비활성**. 매일 자동 실행하려면 아래를 Hermes/OpenClaw 루틴으로 등록한다:
+- **트리거**: KRX 장 마감 후(예: 평일 KST 16:00), 거래일에만.
+- **동작**: 위 0→1→2→3 순서. Hermes 에이전트가 2단계(판단)를 담당.
+- **주간**: 매 금요일 4단계(score) 실행 → 누적 edge 리포트.
+- **가드**: 실패 시 중단·알림. 실주문 절대 없음.
+등록 자체(cron/routine 생성)는 **자율 반복 실행을 시작**하는 행위이므로 사용자 명시 승인 뒤에만 한다.
 
-## 확장 훅 (붙으면 자동 반영)
-- DART 공시: `make_dart_disclosure_provider`(transport·키·corp_code 맵 주입) → record 단계에 provider 연결.
-- 뉴스: `make_news_provider`(source fetch 주입) → 동일.
-- 두 provider 모두 발행시각 PIT 필터는 브리프 빌더가 강제한다.
+## 성공 기준 (무엇을 보면 되나)
+- 수개월 누적 후 `score`의 **edge가 유의하게 양(+)** 이면 → Hermes가 규칙이 못 만든 **선별 알파**를
+  더한다는 첫 증거(생존편향-free). edge ≈ 0이면 → LLM도 베타만 탄다는 정직한 결론.
+- 이 판정이 **paper → 소액 실거래**로 갈지 말지의 근거가 된다. edge 없이 실거래로 가지 않는다.
