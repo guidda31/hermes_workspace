@@ -1,0 +1,35 @@
+# Credentials, API tokens, and local account configuration
+.env
+.env.*
+.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+.kis_token.json
+**/*token*.json
+**/*credential*.json
+**/*secret*.json
+
+# Local Python/runtime artifacts
+.venv/
+.cache/
+__pycache__/
+*.py[cod]
+*.log
+*.sqlite
+*.sqlite3
+*.db
+
+# Local market/account exports and generated research output
+data/
+reports/
+exports/
+*.csv
+*.parquet
+*.xlsx
+*.json
+
+# Local-only planning and notes
+*.md

@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stock-trading-v2"
+version = "0.1.0"
+description = "KRX swing strategy research and backtesting"
+requires-python = ">=3.11"
+dependencies = [
+  "cryptography>=45,<46",
+  "finance-datareader==0.9.202",
+  "openpyxl>=3.1,<4",
+  "pandas==2.3.3",
+  "python-dotenv>=1.0,<2.0",
+  "requests>=2.32,<3.0",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,23 @@
+# INACTIVE TEMPLATE — do not install/enable this file as-is.
+# Deployment is blocked until distinct OS principals and external secret provisioning exist.
+[Unit]
+Description=KIS durable nonce-consumption authority (Phase 1 template)
+After=local-fs.target
+
+[Service]
+Type=simple
+User=kis-nonce-authority
+Group=kis-nonce-authority
+# Placeholder only: an operator-supplied launcher may construct the explicit AF_UNIX handler.
+# No repository CLI/listener exists in Phase 1.
+ExecStart=/usr/local/libexec/kis-nonce-authority-launcher --template-only
+Restart=on-failure
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/kis-nonce-authority /run/kis-nonce-authority
+
+[Install]
+WantedBy=multi-user.target

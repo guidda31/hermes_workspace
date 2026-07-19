@@ -1,0 +1,21 @@
+# INACTIVE TEMPLATE — do not install/enable this file as-is.
+# `kis-executor` must be a distinct principal from `kis-nonce-authority`.
+[Unit]
+Description=KIS privileged executor (future template; not provided by Phase 1)
+After=kis-nonce-authority.service
+
+[Service]
+Type=oneshot
+User=kis-executor
+Group=kis-executor
+# Placeholder only. This repository supplies no KIS/order executor.
+ExecStart=/usr/local/libexec/kis-executor-launcher --template-only
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=/run/kis-nonce-authority
+
+[Install]
+WantedBy=multi-user.target
