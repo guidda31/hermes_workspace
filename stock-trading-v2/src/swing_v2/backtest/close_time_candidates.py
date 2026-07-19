@@ -43,6 +43,8 @@ def assess_close_time_candidates(
     asset_types: object,
     asset_histories: object,
     universe_symbols: Set[str],
+    regime_long_window: int = 200,
+    regime_short_window: int = 50,
 ) -> tuple[CandidateAssessment, ...]:
     """Assess each universe symbol from complete bars available at close.
 
@@ -54,7 +56,7 @@ def assess_close_time_candidates(
     if type(signal_date) is not date:
         raise ValueError("signal_date must be a plain date")
 
-    risk_on = _safe_risk_on(market_closes)
+    risk_on = _safe_risk_on(market_closes, regime_long_window, regime_short_window)
     asset_type_mapping = asset_types if isinstance(asset_types, Mapping) else {}
     history_mapping = asset_histories if isinstance(asset_histories, Mapping) else {}
     assessments: list[CandidateAssessment] = []
@@ -179,9 +181,9 @@ def _validated_history(
     return bars if previous_date == signal_date else None
 
 
-def _safe_risk_on(closes: Sequence[Decimal]) -> bool:
+def _safe_risk_on(closes: Sequence[Decimal], long_window: int, short_window: int) -> bool:
     try:
-        return is_risk_on(closes)
+        return is_risk_on(closes, long_window=long_window, short_window=short_window)
     except (ArithmeticError, TypeError, ValueError):
         return False
 

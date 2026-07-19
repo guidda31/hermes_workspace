@@ -6,14 +6,26 @@ from decimal import Decimal
 from .contracts import DailyBar
 
 
-def is_risk_on(closes: Sequence[Decimal]) -> bool:
-    """Return whether the latest close satisfies the 50/200-day trend filter."""
-    if len(closes) < 200:
+def is_risk_on(
+    closes: Sequence[Decimal], *, long_window: int = 200, short_window: int = 50
+) -> bool:
+    """Return whether the latest close satisfies the short/long-window trend filter.
+
+    The long/short windows are doc-04 §3.1 hypothesis values (default 200/50); they
+    are parameters, not constants, so the regime warm-up and sensitivity can be
+    validated rather than fixed. A shorter long_window trades sooner but reacts more
+    to noise. Fewer than ``long_window`` closes is conservatively risk-off.
+    """
+    if isinstance(long_window, bool) or type(long_window) is not int or long_window < 2:
+        raise ValueError("long_window must be an int >= 2")
+    if isinstance(short_window, bool) or type(short_window) is not int or not 0 < short_window <= long_window:
+        raise ValueError("short_window must be an int in (0, long_window]")
+    if len(closes) < long_window:
         return False
 
-    moving_average_200 = sum(closes[-200:]) / 200
-    moving_average_50 = sum(closes[-50:]) / 50
-    return closes[-1] > moving_average_200 and moving_average_50 > moving_average_200
+    moving_average_long = sum(closes[-long_window:]) / long_window
+    moving_average_short = sum(closes[-short_window:]) / short_window
+    return closes[-1] > moving_average_long and moving_average_short > moving_average_long
 
 
 def is_momentum_breakout(closes: Sequence[Decimal]) -> bool:

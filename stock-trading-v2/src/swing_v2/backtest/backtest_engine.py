@@ -32,6 +32,8 @@ class BacktestRiskConfig:
     initial_stop_pct: Decimal
     max_daily_loss_pct: Decimal
     max_gap_up_pct: Decimal = Decimal("0.05")
+    regime_long_window: int = 200
+    regime_short_window: int = 50
 
 
 @dataclass(frozen=True)
@@ -196,8 +198,9 @@ class BacktestRunner:
         selection = select_eligible_universe(
             config.universe_metadata, trade_date, requested_symbols=config.universe,
         )
+        market_window = config.risk.regime_long_window + 1
         market_closes = _validated_closes(
-            data.get_historical_closes(config.market_symbol, trade_date, 201), config.market_symbol
+            data.get_historical_closes(config.market_symbol, trade_date, market_window), config.market_symbol
         )
         asset_types = {symbol: _validated_asset_type(data.get_asset_type(symbol)) for symbol in selection.symbols}
         histories = {
@@ -210,6 +213,8 @@ class BacktestRunner:
             asset_types=asset_types,
             asset_histories=histories,
             universe_symbols=set(selection.symbols),
+            regime_long_window=config.risk.regime_long_window,
+            regime_short_window=config.risk.regime_short_window,
         ), selection.exclusions
 
     @staticmethod
@@ -277,6 +282,10 @@ def _validate_config(config: object) -> None:
     for name, value in (("risk_per_position", risk.risk_per_position), ("max_position_notional_pct", risk.max_position_notional_pct), ("initial_stop_pct", risk.initial_stop_pct), ("max_daily_loss_pct", risk.max_daily_loss_pct), ("max_gap_up_pct", risk.max_gap_up_pct)):
         if not isinstance(value, Decimal) or not value.is_finite() or not Decimal("0") < value < Decimal("1"):
             raise ValueError(f"risk {name} must be a Decimal between zero and one")
+    if isinstance(risk.regime_long_window, bool) or not isinstance(risk.regime_long_window, int) or risk.regime_long_window < 2:
+        raise ValueError("risk regime_long_window must be an int >= 2")
+    if isinstance(risk.regime_short_window, bool) or not isinstance(risk.regime_short_window, int) or not 0 < risk.regime_short_window <= risk.regime_long_window:
+        raise ValueError("risk regime_short_window must be an int in (0, regime_long_window]")
     _validate_costs(config.costs)
 
 
