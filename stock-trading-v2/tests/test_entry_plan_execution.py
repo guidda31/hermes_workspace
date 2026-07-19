@@ -477,5 +477,44 @@ class EntryPlanExecutionTests(unittest.TestCase):
         self.assertEqual(result.positions[0].initial_stop_price, D("90.90"))
 
 
+class GapUpGuardTests(unittest.TestCase):
+    def _run(self, *, open_price: str, max_gap_up_pct):
+        # plan.expected_open_price defaults to 100 (the signal-day close).
+        return execute_entry_plans_ioc(
+            plans=(plan("GAP"),),
+            next_day_bars={"GAP": bar("GAP", open_price=open_price)},
+            initial_cash=D("10000"),
+            available_cash=D("10000"),
+            costs=COSTS,
+            max_gap_up_pct=max_gap_up_pct,
+        )
+
+    def test_open_above_gap_threshold_blocks_the_entry(self):
+        result = self._run(open_price="106", max_gap_up_pct=D("0.05"))  # +6% > +5%
+        self.assertEqual(result.fills, ())
+        self.assertEqual(result.positions, ())
+        self.assertEqual(result.orders[0].status, "CANCELED_UNFILLED")
+        self.assertEqual(result.orders[0].unfilled_reason, "GAP_UP_BLOCKED")
+
+    def test_open_within_gap_threshold_fills(self):
+        result = self._run(open_price="104", max_gap_up_pct=D("0.05"))  # +4% <= +5%
+        self.assertEqual(len(result.fills), 1)
+        self.assertEqual(result.orders[0].status, "FILLED")
+
+    def test_open_exactly_at_threshold_fills(self):
+        result = self._run(open_price="105", max_gap_up_pct=D("0.05"))  # exactly +5%, not "over"
+        self.assertEqual(len(result.fills), 1)
+
+    def test_no_guard_when_max_gap_up_pct_is_none(self):
+        result = self._run(open_price="130", max_gap_up_pct=None)  # +30% but guard disabled
+        self.assertEqual(len(result.fills), 1)
+
+    def test_invalid_max_gap_up_pct_is_rejected(self):
+        for bad in (D("0"), D("-0.1"), Decimal("NaN"), 0.05):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    self._run(open_price="100", max_gap_up_pct=bad)
+
+
 if __name__ == "__main__":
     unittest.main()

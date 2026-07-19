@@ -88,20 +88,53 @@ class PortfolioValuationTests(unittest.TestCase):
         self.assertEqual(result.unrealized_pnl_by_symbol, {})
         self.assertEqual(result.unrealized_pnl_total, D("0"))
 
-    def test_rejects_missing_untradable_or_stale_bar_for_open_position(self) -> None:
-        portfolio = state(position("OPEN"))
-        invalid_bars = (
+    def test_stale_marks_missing_or_untradable_bar_using_fallback(self) -> None:
+        portfolio = state(position("OPEN", entry_price="100", quantity=10))
+        stale_bar_sets = (
             ("missing", {}),
             ("none", {"OPEN": None}),
             ("untradable", {"OPEN": bar("OPEN", is_tradable=False)}),
             ("zero volume", {"OPEN": bar("OPEN", volume=0)}),
             ("zero trading value", {"OPEN": bar("OPEN", trading_value="0")}),
-            ("stale", {"OPEN": bar("OPEN", trade_date=date(2026, 2, 1))}),
         )
-        for name, bars in invalid_bars:
+        for name, bars in stale_bar_sets:
             with self.subTest(name=name):
-                with self.assertRaises(ValueError):
-                    mark_to_market(state=portfolio, bars_by_symbol=bars, valuation_date=VALUATION_DATE)
+                result = mark_to_market(
+                    state=portfolio, bars_by_symbol=bars, valuation_date=VALUATION_DATE,
+                    fallback_close_by_symbol={"OPEN": D("95")},
+                )
+                self.assertEqual(result.stale_mark_count, 1)
+                self.assertEqual(result.stale_symbols, ("OPEN",))
+                self.assertEqual(result.open_market_value, D("950"))  # 10 shares * 95 fallback
+                self.assertEqual(result.unrealized_pnl_by_symbol, {"OPEN": D("-50")})
+
+    def test_stale_mark_falls_back_to_entry_price_without_a_fallback_close(self) -> None:
+        portfolio = state(position("OPEN", entry_price="100", quantity=10))
+        result = mark_to_market(
+            state=portfolio, bars_by_symbol={"OPEN": None}, valuation_date=VALUATION_DATE,
+        )
+        self.assertEqual(result.stale_mark_count, 1)
+        self.assertEqual(result.open_market_value, D("1000"))  # 10 * entry_price 100
+        self.assertEqual(result.unrealized_pnl_by_symbol, {"OPEN": D("0")})
+
+    def test_valid_bar_is_not_stale(self) -> None:
+        portfolio = state(position("OPEN", quantity=10))
+        result = mark_to_market(
+            state=portfolio, bars_by_symbol={"OPEN": bar("OPEN", close="110")},
+            valuation_date=VALUATION_DATE, fallback_close_by_symbol={"OPEN": D("95")},
+        )
+        self.assertEqual(result.stale_mark_count, 0)
+        self.assertEqual(result.stale_symbols, ())
+        self.assertEqual(result.open_market_value, D("1100"))  # marks at the live close, not fallback
+
+    def test_wrong_trade_date_bar_still_raises(self) -> None:
+        portfolio = state(position("OPEN"))
+        with self.assertRaises(ValueError):
+            mark_to_market(
+                state=portfolio,
+                bars_by_symbol={"OPEN": bar("OPEN", trade_date=date(2026, 2, 1))},
+                valuation_date=VALUATION_DATE,
+            )
 
     def test_rejects_bar_symbol_or_asset_identity_mismatch(self) -> None:
         portfolio = state(position("OPEN"))

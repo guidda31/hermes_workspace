@@ -95,7 +95,9 @@ class BacktestRunnerRegressionTests(unittest.TestCase):
         config = BacktestConfig(
             start_date=d1, end_date=d2, universe=(symbol,), market_symbol="MARKET",
             initial_cash=D("10000"), costs=costs,
-            risk=BacktestRiskConfig(D("0.20"), 1, D("0.20"), D("0.05"), D("0.50")),
+            # This fixture's 33% next-open gap exercises fill-cost mechanics, not the
+            # gap-up guard (covered separately), so the guard is widened here.
+            risk=BacktestRiskConfig(D("0.20"), 1, D("0.20"), D("0.05"), D("0.50"), D("0.99")),
             universe_metadata=_metadata(d1, (symbol, AssetType.STOCK, frozenset())),
         )
 
@@ -123,7 +125,7 @@ class BacktestRunnerRegressionTests(unittest.TestCase):
         costs = ExecutionCostConfig(D("0"), D("0"), D("0"), D("0"), {"STOCK": D("0")}, D("0"), lambda price, _side: price)
         config = BacktestConfig(
             d1, d2, (allowed, excluded), "MARKET", D("10000"), costs,
-            BacktestRiskConfig(D("0.20"), 2, D("0.20"), D("0.05"), D("0.50")),
+            BacktestRiskConfig(D("0.20"), 2, D("0.20"), D("0.05"), D("0.50"), D("0.99")),  # widen gap guard; see above
             _metadata(d1, (allowed, AssetType.STOCK, frozenset()), (excluded, AssetType.SPAC, frozenset())),
         )
 

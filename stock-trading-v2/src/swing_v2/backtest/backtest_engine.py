@@ -31,6 +31,7 @@ class BacktestRiskConfig:
     max_position_notional_pct: Decimal
     initial_stop_pct: Decimal
     max_daily_loss_pct: Decimal
+    max_gap_up_pct: Decimal = Decimal("0.05")
 
 
 @dataclass(frozen=True)
@@ -153,6 +154,7 @@ class BacktestRunner:
                 costs=config.costs,
                 closing_bars_by_symbol=bars,
                 historical_closes_by_symbol=historical_closes,
+                max_gap_up_pct=config.risk.max_gap_up_pct,
             )
             days.append(day)
             state = day.closing_state
@@ -272,7 +274,7 @@ def _validate_config(config: object) -> None:
     risk = config.risk
     if isinstance(risk.max_positions, bool) or not isinstance(risk.max_positions, int) or risk.max_positions < 1:
         raise ValueError("risk max_positions must be a positive int")
-    for name, value in (("risk_per_position", risk.risk_per_position), ("max_position_notional_pct", risk.max_position_notional_pct), ("initial_stop_pct", risk.initial_stop_pct), ("max_daily_loss_pct", risk.max_daily_loss_pct)):
+    for name, value in (("risk_per_position", risk.risk_per_position), ("max_position_notional_pct", risk.max_position_notional_pct), ("initial_stop_pct", risk.initial_stop_pct), ("max_daily_loss_pct", risk.max_daily_loss_pct), ("max_gap_up_pct", risk.max_gap_up_pct)):
         if not isinstance(value, Decimal) or not value.is_finite() or not Decimal("0") < value < Decimal("1"):
             raise ValueError(f"risk {name} must be a Decimal between zero and one")
     _validate_costs(config.costs)
@@ -363,7 +365,8 @@ def _build_result(days: Sequence[PortfolioDayResult], guards: Sequence[DailyLoss
             nav_close=nav, daily_return=nav / prior_nav - Decimal("1"),
             cumulative_return=nav / initial_cash - Decimal("1"), peak_nav=peak_nav,
             drawdown=nav / peak_nav - Decimal("1"), gross_exposure=day.valuation.open_market_value / nav if nav else Decimal("0"),
-            position_count=sum(position.status == "OPEN" for position in day.closing_state.positions), stale_mark_count=0,
+            position_count=sum(position.status == "OPEN" for position in day.closing_state.positions),
+            stale_mark_count=day.valuation.stale_mark_count,
             new_entry_blocked=not guard.entries_allowed, new_entry_block_reason=guard.reason,
         ))
         orders.extend(day.exit_run_result.orders); orders.extend(day.entry_run_result.orders)

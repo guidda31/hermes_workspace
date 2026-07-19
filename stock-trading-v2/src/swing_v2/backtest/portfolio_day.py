@@ -45,6 +45,7 @@ def run_portfolio_day(
     costs: ExecutionCostConfig,
     closing_bars_by_symbol: Mapping[str, DailyBar | None],
     historical_closes_by_symbol: Mapping[str, Sequence[Decimal]],
+    max_gap_up_pct: Decimal | None = None,
 ) -> PortfolioDayResult:
     """Process pending IOC orders, close-time exits, and NAV for ``trade_date``.
 
@@ -97,6 +98,7 @@ def run_portfolio_day(
         initial_cash=after_exits.cash,
         available_cash=planned_entry_available_cash,
         costs=costs,
+        max_gap_up_pct=max_gap_up_pct,
     )
     after_entries = apply_entry_execution(after_exits, entry_run)
 
@@ -112,10 +114,19 @@ def run_portfolio_day(
         orders=after_entries.orders,
         fills=after_entries.fills,
     )
+    # The last close in each open/pending symbol's history (ending at trade_date) is
+    # the last valid mark, used to stale-mark a position whose session bar is absent
+    # or untradable rather than crashing the run.
+    fallback_close_by_symbol = {
+        symbol: tuple(closes)[-1]
+        for symbol, closes in historical_closes_by_symbol.items()
+        if tuple(closes)
+    }
     valuation = mark_to_market(
         state=closing_state,
         bars_by_symbol=closing_bars_by_symbol,
         valuation_date=trade_date,
+        fallback_close_by_symbol=fallback_close_by_symbol,
     )
     return PortfolioDayResult(
         trade_date=trade_date,

@@ -33,6 +33,7 @@ def execute_entry_plans_ioc(
     initial_cash: Decimal,
     available_cash: Decimal,
     costs: ExecutionCostConfig,
+    max_gap_up_pct: Decimal | None = None,
 ) -> RunResult:
     """Execute ranked entry plans exactly once at their respective next-day opens.
 
@@ -61,6 +62,10 @@ def execute_entry_plans_ioc(
         initial_cash,
         available_cash,
     )
+    if max_gap_up_pct is not None and (
+        not isinstance(max_gap_up_pct, Decimal) or not max_gap_up_pct.is_finite() or max_gap_up_pct <= 0
+    ):
+        raise ValueError("max_gap_up_pct must be a positive finite Decimal or None")
 
     cash = initial_cash
     executable_cash = available_cash
@@ -80,6 +85,12 @@ def execute_entry_plans_ioc(
             continue
 
         assert bar is not None
+        # Gap-up guard: a next-session open more than max_gap_up_pct above the
+        # signal-day close (plan.expected_open_price) is a chase we refuse (doc-02 §5).
+        if max_gap_up_pct is not None and bar.open > plan.expected_open_price * (Decimal("1") + max_gap_up_pct):
+            orders.append(_cancel(order, "GAP_UP_BLOCKED"))
+            continue
+
         filled_order = replace(
             order,
             status="FILLED",
