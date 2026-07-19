@@ -20,6 +20,7 @@ from .brief import EvidenceProvider
 from .dart_corp_codes import load_corp_codes_from_zip
 from .dart_disclosures import make_dart_disclosure_provider
 from .dart_transport import dart_http_get, fetch_corp_code_zip
+from .naver_news import naver_news_provider_or_none
 from .news_provider import make_news_provider
 
 _DART_ENV_KEYS = ("OPENDART_API_KEY", "DART_API_KEY")
@@ -79,6 +80,34 @@ def dart_provider_from_env(
 def news_provider(*, fetch, window_days: int = 14) -> EvidenceProvider:
     """Wrap an injected news ``fetch`` (source-agnostic) into an EvidenceProvider."""
     return make_news_provider(fetch=fetch, window_days=window_days)
+
+
+def news_provider_or_none(
+    *,
+    symbols: Sequence[str],
+    name_cache_path=None,
+    name_by_symbol: Optional[Mapping[str, str]] = None,
+    env: Optional[Mapping[str, str]] = None,
+    window_days: int = 14,
+    http_get: Optional[Callable[[str, Mapping[str, str]], Mapping]] = None,
+) -> Optional[EvidenceProvider]:
+    """Build a Naver-News provider from the environment, or None if unavailable.
+
+    Graceful: with no symbol->Korean-name map (param or cache file) or no NAVER keys,
+    returns None so the brief simply carries no news and nothing breaks.
+    """
+    names = dict(name_by_symbol) if name_by_symbol is not None else None
+    if names is None and name_cache_path is not None:
+        path = Path(name_cache_path)
+        if path.exists():
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                names = {str(k): str(v) for k, v in loaded.items()}
+    if not names:
+        return None
+    return naver_news_provider_or_none(
+        symbols=symbols, name_by_symbol=names, env=env, window_days=window_days, http_get=http_get,
+    )
 
 
 def _optional_dart_key(env: Mapping[str, str]) -> Optional[str]:

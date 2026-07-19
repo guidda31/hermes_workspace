@@ -26,6 +26,7 @@ from ..llm.brief import build_brief
 from ..llm.decision import parse_decision_set
 from ..llm.guardrail import GuardrailConfig, PortfolioContext, apply_guardrails
 from ..llm.prompt import parse_agent_response, render_brief_prompt
+from ..llm.providers import dart_disclosure_provider_or_none, news_provider_or_none
 from .kill_switch import engage_kill_switch, is_kill_switch_engaged, release_kill_switch
 from .ledger import load_latest_account
 from .runner import paper_report, run_paper_session
@@ -62,9 +63,17 @@ def _held_symbols(session_dir) -> frozenset[str]:
 def render_paper_prompt(
     *, snapshot_path, signal_date: date, symbols: Sequence[str],
     session_dir, kill_switch_path, window: int = _DEFAULT_WINDOW,
+    disclosure_provider=None, news_provider=None,
 ) -> str:
-    """Render the agent prompt, reflecting current holdings and the kill switch."""
-    brief = build_brief(_load_data(snapshot_path), signal_date=signal_date, symbols=symbols, window=window)
+    """Render the agent prompt, reflecting current holdings and the kill switch.
+
+    A ``disclosure_provider`` (e.g. DART) surfaces point-in-time disclosures in the
+    brief; with no provider the brief stays price-only.
+    """
+    brief = build_brief(
+        _load_data(snapshot_path), signal_date=signal_date, symbols=symbols, window=window,
+        disclosure_provider=disclosure_provider, news_provider=news_provider,
+    )
     portfolio = PortfolioContext(_held_symbols(session_dir), is_kill_switch_engaged(kill_switch_path))
     return render_brief_prompt(brief, portfolio=portfolio)
 
@@ -74,10 +83,18 @@ def run_paper_day(
     agent_reply: str, eligible: frozenset[str], session_dir, kill_switch_path,
     initial_cash: Decimal, max_gap_up_pct: Optional[Decimal] = _DEFAULT_MAX_GAP_UP_PCT,
     window: int = _DEFAULT_WINDOW,
+    disclosure_provider=None, news_provider=None,
 ) -> PaperSessionResult:
-    """Guardrail the agent's reply against the recovered account and run one session."""
+    """Guardrail the agent's reply against the recovered account and run one session.
+
+    The same providers used at ``render`` time must be passed here so the recorded/
+    guardrailed brief (its evidence ids) matches what the agent saw.
+    """
     data = _load_data(snapshot_path)
-    brief = build_brief(data, signal_date=signal_date, symbols=symbols, window=window)
+    brief = build_brief(
+        data, signal_date=signal_date, symbols=symbols, window=window,
+        disclosure_provider=disclosure_provider, news_provider=news_provider,
+    )
     decisions = parse_decision_set(
         parse_agent_response(agent_reply),
         known_symbols=brief.known_symbols, known_evidence_ids=brief.known_evidence_ids,
@@ -115,6 +132,10 @@ def build_parser() -> argparse.ArgumentParser:
         render.add_argument(arg, required=True)
     render.add_argument("--signal-date", required=True, type=date.fromisoformat)
     render.add_argument("--symbols", required=True, type=_symbols)
+    render.add_argument("--corp-code-cache", default="data/dart-corp-codes.json",
+                        help="local {symbol: corp_code} cache for DART disclosures")
+    render.add_argument("--news-name-cache", default="data/universe-names.json",
+                        help="local {symbol: Korean name} map for Naver news")
 
     run = sub.add_parser("run", help="run one paper session from the agent's reply")
     for arg in ("--snapshot", "--session-dir", "--kill-switch", "--reply-file", "--model-id"):
@@ -124,6 +145,10 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--symbols", required=True, type=_symbols)
     run.add_argument("--eligible", required=True, type=_symbols)
     run.add_argument("--initial-cash", required=True, type=Decimal)
+    run.add_argument("--corp-code-cache", default="data/dart-corp-codes.json",
+                     help="local {symbol: corp_code} cache for DART disclosures")
+    run.add_argument("--news-name-cache", default="data/universe-names.json",
+                     help="local {symbol: Korean name} map for Naver news")
 
     report = sub.add_parser("report", help="print the cumulative paper report")
     report.add_argument("--session-dir", required=True)
@@ -138,19 +163,31 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    # Load OPENDART_API_KEY (and any local config) from .env, like the forward CLI.
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except ImportError:
+        pass
     args = build_parser().parse_args(argv)
     if args.command == "render":
+        provider = dart_disclosure_provider_or_none(symbols=args.symbols, cache_path=args.corp_code_cache)
+        news = news_provider_or_none(symbols=args.symbols, name_cache_path=args.news_name_cache)
         sys.stdout.write(render_paper_prompt(
             snapshot_path=args.snapshot, signal_date=args.signal_date, symbols=args.symbols,
             session_dir=args.session_dir, kill_switch_path=args.kill_switch,
+            disclosure_provider=provider, news_provider=news,
         ))
         return 0
     if args.command == "run":
         reply = sys.stdin.read() if args.reply_file == "-" else Path(args.reply_file).read_text(encoding="utf-8")
+        provider = dart_disclosure_provider_or_none(symbols=args.symbols, cache_path=args.corp_code_cache)
+        news = news_provider_or_none(symbols=args.symbols, name_cache_path=args.news_name_cache)
         result = run_paper_day(
             snapshot_path=args.snapshot, signal_date=args.signal_date, execution_date=args.execution_date,
             symbols=args.symbols, agent_reply=reply, eligible=frozenset(args.eligible),
             session_dir=args.session_dir, kill_switch_path=args.kill_switch, initial_cash=args.initial_cash,
+            disclosure_provider=provider, news_provider=news,
         )
         sys.stdout.write(
             f"execution_date={result.trade_date} fills={[f.symbol for f in result.fills]} "

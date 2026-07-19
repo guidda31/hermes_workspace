@@ -24,7 +24,7 @@ from .forward_eval import ForwardObservationReport, evaluate_forward_observation
 from .forward_runner import run_forward_signal
 from .guardrail import GuardrailConfig, PortfolioContext
 from .prompt import parse_agent_response, render_brief_prompt
-from .providers import dart_disclosure_provider_or_none
+from .providers import dart_disclosure_provider_or_none, news_provider_or_none
 from .signal_audit import load_signal_audit
 from .brief import build_brief
 
@@ -154,6 +154,8 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--window", default=_DEFAULT_WINDOW, type=int)
     common.add_argument("--corp-code-cache", default="data/dart-corp-codes.json",
                         help="local {symbol: corp_code} cache for DART disclosures")
+    common.add_argument("--news-name-cache", default="data/universe-names.json",
+                        help="local {symbol: Korean name} map for Naver news")
 
     render = sub.add_parser("render", parents=[common], help="print the agent prompt")
 
@@ -180,10 +182,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "render":
         provider = dart_disclosure_provider_or_none(symbols=args.symbols, cache_path=args.corp_code_cache)
+        news = news_provider_or_none(symbols=args.symbols, name_cache_path=args.news_name_cache)
         sys.stdout.write(render_from_snapshot(
             args.snapshot, args.signal_date, args.symbols,
             held=args.held, new_entries_blocked=args.new_entries_blocked, window=args.window,
-            disclosure_provider=provider,
+            disclosure_provider=provider, news_provider=news,
         ))
         return 0
     if args.command == "score":
@@ -199,12 +202,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
     reply = sys.stdin.read() if args.reply_file == "-" else Path(args.reply_file).read_text(encoding="utf-8")
     provider = dart_disclosure_provider_or_none(symbols=args.symbols, cache_path=args.corp_code_cache)
+    news = news_provider_or_none(symbols=args.symbols, name_cache_path=args.news_name_cache)
     record = record_from_snapshot(
         args.snapshot, args.signal_date, args.symbols, reply,
         eligible=args.eligible, model_id=args.model_id,
         decided_at=datetime.now(_KST), held=args.held,
         new_entries_blocked=args.new_entries_blocked, output_path=args.output, window=args.window,
-        disclosure_provider=provider,
+        disclosure_provider=provider, news_provider=news,
     )
     sys.stdout.write(
         f"signal_date={record['signal_date']} admitted={record['admitted_symbols']} "
