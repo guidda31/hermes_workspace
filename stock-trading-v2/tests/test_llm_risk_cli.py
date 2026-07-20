@@ -4,7 +4,8 @@ import unittest
 from datetime import date, datetime, timedelta, timezone
 
 from swing_v2.llm.brief import EvidenceItem
-from swing_v2.llm.risk_cli import format_digest, watch_risks
+from swing_v2.llm.risk_cli import build_parser, format_digest, format_refined_digest, watch_risks
+from swing_v2.llm.risk_review import RefinedRiskFlag
 from swing_v2.llm.risk_screen import Severity
 
 KST = timezone(timedelta(hours=9))
@@ -60,6 +61,32 @@ class WatchRisksTests(unittest.TestCase):
     def test_digest_when_no_flags_says_clear(self):
         digest = format_digest([], names={}, as_of=date(2026, 7, 20))
         self.assertRegex(digest, r"no material|없음|clear|None")
+
+
+class RefinedDigestTests(unittest.TestCase):
+    def test_refined_digest_shows_reason_and_action(self):
+        refined = (
+            RefinedRiskFlag("068270", "CLINICAL_SETBACK", Severity.HIGH, "임상 조기종료",
+                            "dart:068270:1", "핵심 파이프라인 차질", "비중 축소"),
+        )
+        out = format_refined_digest(refined, names={"068270": "셀트리온"}, as_of=date(2026, 7, 20))
+        self.assertIn("HIGH", out)
+        self.assertIn("셀트리온", out)
+        self.assertIn("핵심 파이프라인 차질", out)
+        self.assertIn("비중 축소", out)
+
+    def test_refined_digest_empty_is_clear(self):
+        self.assertRegex(format_refined_digest((), names={}, as_of=date(2026, 7, 20)), r"clear|없음|no material")
+
+
+class ParserTests(unittest.TestCase):
+    def test_three_subcommands_exist(self):
+        parser = build_parser()
+        for cmd in ("watch", "review-prompt"):
+            self.assertEqual(parser.parse_args([cmd, "--symbols", "005930"]).command, cmd)
+        args = parser.parse_args(["review", "--symbols", "005930", "--reply-file", "r.json"])
+        self.assertEqual(args.command, "review")
+        self.assertEqual(args.reply_file, "r.json")
 
 
 if __name__ == "__main__":
