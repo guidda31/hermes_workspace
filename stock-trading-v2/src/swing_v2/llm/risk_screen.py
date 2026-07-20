@@ -38,6 +38,8 @@ _RULES: tuple[tuple[Severity, str, tuple[str, ...], tuple[str, ...]], ...] = (
     (Severity.HIGH, "MANAGEMENT_ISSUE", ("관리종목",), ("미지정", "해제")),
     (Severity.HIGH, "DELISTING_RISK", ("상장폐지", "상장적격성", "실질심사"), ()),
     (Severity.HIGH, "FRAUD", ("횡령", "배임"), ()),
+    (Severity.HIGH, "INVESTIGATION", ("세무조사", "압수수색", "검찰수사", "경찰수사", "구속영장", "구속기소", "기소"),
+     ("불기소", "무혐의")),
     (Severity.HIGH, "INSOLVENCY", ("부도", "회생절차", "파산", "감사의견거절", "감사의견한정", "의견거절"), ()),
     (Severity.HIGH, "DISCLOSURE_VIOLATION", ("불성실공시",), ("미지정", "지정유예", "해제")),
     (Severity.HIGH, "PRODUCTION_HALT", ("생산중단", "영업정지"), ()),
@@ -45,6 +47,7 @@ _RULES: tuple[tuple[Severity, str, tuple[str, ...], tuple[str, ...]], ...] = (
     (Severity.MEDIUM, "DILUTION", ("유상증자", "전환사채", "신주인수권부사채", "교환사채"),
      ("발행결과", "발행실적", "실적보고서", "증권발행실적")),
     (Severity.MEDIUM, "LITIGATION", ("소송",), ()),
+    (Severity.MEDIUM, "REGULATORY", ("과징금", "리콜", "담합"), ()),
     (Severity.MEDIUM, "CONTROL_CHANGE", ("최대주주변경", "경영권"), ()),
 )
 

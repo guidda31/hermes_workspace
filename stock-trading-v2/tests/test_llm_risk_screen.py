@@ -78,6 +78,29 @@ class RiskScreenTests(unittest.TestCase):
         self.assertEqual(flags[0].evidence_id, "dX")
         self.assertIn("생산중단", flags[0].disclosure_title)
 
+    # --- news-vocabulary risks (titles that appear in news, not formal DART filings) ---
+    def test_flags_tax_investigation_high(self):
+        # the concrete case: 하나은행 "특별세무조사" surfaced in news before any disclosure.
+        flags = screen_disclosures("086790", (_item("n1", "'특별세무조사' 하나은행, 인천시 금고 입찰 참여 논란", "086790"),))
+        self.assertEqual(self._cats(flags), {("INVESTIGATION", Severity.HIGH)})
+
+    def test_flags_raid_and_prosecution_high(self):
+        for title in ("검찰, 본사 압수수색", "대표 검찰수사 착수", "전 임원 구속기소"):
+            flags = screen_disclosures("XXXXXX", (_item("n", title),))
+            self.assertEqual(flags[0].category, "INVESTIGATION")
+            self.assertIs(flags[0].severity, Severity.HIGH)
+
+    def test_non_indictment_is_not_flagged(self):
+        # "불기소"/"무혐의" is exoneration — must not flag as INVESTIGATION.
+        flags = screen_disclosures("XXXXXX", (_item("n", "검찰, 오너 불기소 처분"),))
+        self.assertEqual(flags, ())
+
+    def test_flags_regulatory_fine_and_recall_medium(self):
+        for title in ("공정위 과징금 부과", "완성차 대규모 리콜 결정", "가격 담합 적발"):
+            flags = screen_disclosures("XXXXXX", (_item("n", title),))
+            self.assertEqual(flags[0].category, "REGULATORY")
+            self.assertIs(flags[0].severity, Severity.MEDIUM)
+
 
 if __name__ == "__main__":
     unittest.main()
