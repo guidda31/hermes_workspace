@@ -11,6 +11,7 @@ import tempfile
 import unittest
 from datetime import date
 from decimal import Decimal
+from pathlib import Path
 
 from swing_v2.kis import KisCredentials
 from swing_v2.live.audit import IntentAuditWriter
@@ -109,10 +110,14 @@ class SubmitPilotOrderTests(unittest.TestCase):
             session=session, audit_writer=IntentAuditWriter(tempfile.mkdtemp()),
         )
 
+    def _unengaged_switch(self):
+        return str(Path(tempfile.mkdtemp()) / "live-kill-switch.json")  # absent -> not halted
+
     def test_submits_exactly_one_order_when_armed(self):
         session = _FakeSession(self._ACK)
         ack = submit_pilot_order(_tiny_buy(), client=self._client(session),
-                                 operator_confirmation=LIVE_OPERATOR_CONFIRMATION)
+                                 operator_confirmation=LIVE_OPERATOR_CONFIRMATION,
+                                 kill_switch_path=self._unengaged_switch())
         self.assertEqual(ack.order_number, "0000000123")
         self.assertEqual(len(session.posts), 1)
         self.assertIn("order-cash", session.posts[0][0])
@@ -121,8 +126,20 @@ class SubmitPilotOrderTests(unittest.TestCase):
         session = _FakeSession(self._ACK)
         with self.assertRaises(ValueError):
             submit_pilot_order(_tiny_buy(), client=self._client(session),
-                               operator_confirmation="not-the-phrase")
+                               operator_confirmation="not-the-phrase",
+                               kill_switch_path=self._unengaged_switch())
         self.assertEqual(session.posts, [])
+
+    def test_engaged_kill_switch_blocks_submission(self):
+        from datetime import datetime, timezone
+        from swing_v2.live.kill_switch import LiveTradingHalted, engage_kill_switch
+        path = self._unengaged_switch()
+        engage_kill_switch(path, reason="manual test halt", engaged_at=datetime.now(timezone.utc))
+        session = _FakeSession(self._ACK)
+        with self.assertRaises(LiveTradingHalted):
+            submit_pilot_order(_tiny_buy(), client=self._client(session),
+                               operator_confirmation=LIVE_OPERATOR_CONFIRMATION, kill_switch_path=path)
+        self.assertEqual(session.posts, [])  # fail-closed: no order despite correct confirmation
 
 
 class CliTests(unittest.TestCase):
@@ -158,6 +175,22 @@ class CliTests(unittest.TestCase):
             rc = pilot_cli.main(["submit", *self._BASE, "--arm", "--operator-confirm", "nope"])
         self.assertEqual(rc, 2)
         self.assertIn("operator-confirm", err.getvalue())
+
+    def test_halt_then_submit_is_blocked_then_resume(self):
+        switch = str(Path(tempfile.mkdtemp()) / "ks.json")
+        # halt
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(pilot_cli.main(["halt", "--reason", "test", "--kill-switch", switch]), 0)
+        # submit is fail-closed blocked even with a correct arm + confirmation
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            rc = pilot_cli.main(["submit", *self._BASE, "--arm",
+                                 "--operator-confirm", LIVE_OPERATOR_CONFIRMATION, "--kill-switch", switch])
+        self.assertEqual(rc, 2)
+        self.assertIn("HALTED", err.getvalue())
+        # resume clears it
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(pilot_cli.main(["resume", "--kill-switch", switch]), 0)
 
 
 if __name__ == "__main__":

@@ -33,6 +33,14 @@ from typing import Optional, Sequence
 from .account_state import AccountState, read_account_state
 from .gate import LIVE_OPERATOR_CONFIRMATION
 from .intent import Side
+from .kill_switch import (
+    DEFAULT_LIVE_KILL_SWITCH,
+    LiveTradingHalted,
+    engage_kill_switch,
+    read_kill_switch,
+    release_kill_switch,
+    require_not_halted,
+)
 from .pilot import (
     PILOT_MAX_ORDER_NOTIONAL,
     PILOT_MAX_POSITIONS,
@@ -43,6 +51,10 @@ from .pilot import (
 from .pilot_reconcile import reconcile_via_client
 
 _KST = timezone(timedelta(hours=9))
+
+
+def _kill_switch_path(args) -> str:
+    return getattr(args, "kill_switch", None) or os.getenv("KIS_KILL_SWITCH") or DEFAULT_LIVE_KILL_SWITCH
 
 
 def _normalize_account(raw: str) -> str:
@@ -79,6 +91,12 @@ def build_parser() -> argparse.ArgumentParser:
     submit.add_argument("--arm", action="store_true", help="required to actually place the order")
     submit.add_argument("--operator-confirm", default="", help=f'must equal "{LIVE_OPERATOR_CONFIRMATION}"')
     submit.add_argument("--audit-dir", default="data/live-audit")
+    submit.add_argument("--kill-switch", default=None, help=f"halt marker path (default {DEFAULT_LIVE_KILL_SWITCH})")
+    halt = sub.add_parser("halt", help="engage the kill switch: block all live submissions")
+    halt.add_argument("--reason", required=True)
+    halt.add_argument("--kill-switch", default=None)
+    resume = sub.add_parser("resume", help="release the kill switch (manual re-enable)")
+    resume.add_argument("--kill-switch", default=None)
     recon = sub.add_parser("reconcile", help="read-only: did this order fill?")
     recon.add_argument("--symbol", required=True)
     recon.add_argument("--order-number", required=True)
@@ -121,7 +139,24 @@ def _resolve_state(args, account_no: str) -> AccountState:
 
 # --- subcommands --------------------------------------------------------------------
 
+def _run_halt(args) -> int:
+    path = _kill_switch_path(args)
+    engage_kill_switch(path, reason=args.reason, engaged_at=datetime.now(_KST))
+    sys.stdout.write(f"kill switch ENGAGED at {path} — live submissions are now blocked.\n")
+    return 0
+
+
+def _run_resume(args) -> int:
+    path = _kill_switch_path(args)
+    release_kill_switch(path)
+    sys.stdout.write(f"kill switch released at {path} — live submissions allowed again.\n")
+    return 0
+
+
 def _run_order_command(args, account_no: str) -> int:
+    marker = read_kill_switch(_kill_switch_path(args))
+    if marker is not None:
+        sys.stdout.write(f"kill switch: ENGAGED ({marker.get('reason')}) — submit will be blocked\n")
     state = _resolve_state(args, account_no)
     try:
         plan = build_pilot_order(
@@ -138,7 +173,13 @@ def _run_order_command(args, account_no: str) -> int:
     if args.command == "preflight":
         return 0
 
-    # submit path — two independent human gates before any network call
+    # submit path — independent gates before any network call
+    kill_switch = _kill_switch_path(args)
+    try:
+        require_not_halted(kill_switch)  # fail-closed: engaged/corrupt switch blocks everything
+    except LiveTradingHalted as exc:
+        sys.stderr.write(f"\nREFUSING to submit: {exc}\n(release with `resume --kill-switch {kill_switch}`)\n")
+        return 2
     if not args.arm:
         sys.stderr.write("\nREFUSING to submit: pass --arm to place this real order.\n")
         return 2
@@ -157,7 +198,8 @@ def _run_order_command(args, account_no: str) -> int:
         session=requests.Session(), audit_writer=IntentAuditWriter(args.audit_dir),
     )
     sys.stdout.write("\n*** ARMED — placing a REAL order on a REAL account ***\n")
-    ack = submit_pilot_order(plan, client=client, operator_confirmation=args.operator_confirm)
+    ack = submit_pilot_order(plan, client=client, operator_confirmation=args.operator_confirm,
+                             kill_switch_path=kill_switch)
     sys.stdout.write(f"ACCEPTED by KIS: org={ack.forwarding_order_organization} order_no={ack.order_number}\n")
 
     # best-effort fill reconciliation (fills can lag; a miss here is not an order failure)
@@ -199,6 +241,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except ImportError:
         pass
     args = build_parser().parse_args(argv)
+
+    # kill-switch commands need no account
+    if args.command == "halt":
+        return _run_halt(args)
+    if args.command == "resume":
+        return _run_resume(args)
+
     account_no = _normalize_account(args.account_no or os.getenv("KIS_ACCOUNT_NO", ""))
     if not account_no:
         sys.stderr.write("no account: pass --account-no or set KIS_ACCOUNT_NO in .env\n")

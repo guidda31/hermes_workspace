@@ -24,6 +24,7 @@ from decimal import Decimal
 
 from .gate import LiveExecutionConfig
 from .intent import LiveOrderIntent, OrderMode, Side
+from .kill_switch import require_not_halted
 from .risk import AccountRiskSnapshot, PretradeLimits, validate_pretrade
 
 # A pilot is deliberately tiny — these caps sit far below the standing PretradeLimits.
@@ -125,14 +126,17 @@ def describe_pilot_plan(plan: PilotOrderPlan, *, account_number: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-def submit_pilot_order(plan: PilotOrderPlan, *, client, operator_confirmation: str):
+def submit_pilot_order(plan: PilotOrderPlan, *, client, operator_confirmation: str, kill_switch_path):
     """Submit a built plan through the existing gated production client.
 
-    ``operator_confirmation`` must equal the gate's required phrase or the gate raises
-    before any network call. Returns the broker acknowledgement on success.
+    Fail-closed order of checks before any network call: (1) the manual kill switch at
+    ``kill_switch_path`` must be disengaged (else raise ``LiveTradingHalted``); (2)
+    ``operator_confirmation`` must equal the gate's required phrase (else the gate
+    raises). Returns the broker acknowledgement on success.
     """
     if type(plan) is not PilotOrderPlan:
         raise ValueError("plan must be a PilotOrderPlan")
+    require_not_halted(kill_switch_path)  # fail-closed: an engaged/corrupt switch blocks the order
     config = LiveExecutionConfig(live_trading_enabled=True, operator_confirmation=operator_confirmation)
     return client.submit_cash_limit_order(
         config=config, intent=plan.intent, snapshot=plan.snapshot, limits=plan.limits,
