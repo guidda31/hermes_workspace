@@ -129,10 +129,13 @@ class CliTests(unittest.TestCase):
     _BASE = ["--symbol", "086790", "--side", "BUY", "--qty", "1",
              "--limit-price", "50000", "--equity", "10000000", "--account-no", "12345678-01"]
 
-    def test_parser_has_both_subcommands(self):
+    def test_parser_has_the_three_subcommands(self):
         parser = pilot_cli.build_parser()
         self.assertEqual(parser.parse_args(["preflight", *self._BASE]).command, "preflight")
         self.assertEqual(parser.parse_args(["submit", *self._BASE, "--arm"]).command, "submit")
+        recon = parser.parse_args(["reconcile", "--symbol", "086790", "--order-number", "0000000123"])
+        self.assertEqual(recon.command, "reconcile")
+        self.assertEqual(recon.order_number, "0000000123")
 
     def test_preflight_prints_dry_run_and_places_nothing(self):
         out = io.StringIO()
