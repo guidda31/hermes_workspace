@@ -88,6 +88,10 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(args.command, "review")
         self.assertEqual(args.reply_file, "r.json")
 
+    def test_from_records_flag_accepted(self):
+        args = build_parser().parse_args(["watch", "--from-records", "data/forward-records"])
+        self.assertEqual(args.from_records, "data/forward-records")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -20,6 +20,7 @@ from pathlib import Path
 import sys
 from typing import Optional
 
+from .positions import held_symbols_from_records
 from .providers import dart_disclosure_provider_or_none, news_provider_or_none
 from .risk_review import RefinedRiskFlag, apply_review, parse_risk_review, render_risk_review_prompt
 from .risk_screen import RiskFlag, Severity, screen_disclosures
@@ -95,6 +96,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--symbols", default=None, help="comma-separated; defaults to the saved universe")
+    common.add_argument("--from-records", default=None,
+                        help="watch only symbols the forward records imply you hold (dir path)")
     common.add_argument("--universe", default="data/universe-symbols.json")
     common.add_argument("--names", default="data/universe-names.json")
     common.add_argument("--as-of", default=None, type=date.fromisoformat, help="defaults to today (KST)")
@@ -111,13 +114,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _screen(args) -> tuple[tuple[str, ...], dict, date, list[RiskFlag]]:
     """Shared deterministic screening used by every subcommand."""
-    symbols = (
-        tuple(s.strip() for s in args.symbols.split(",") if s.strip())
-        if args.symbols else tuple(_load_json(args.universe, []))
-    )
-    if not symbols:
-        raise SystemExit("no symbols (pass --symbols or provide data/universe-symbols.json)")
     as_of = args.as_of or datetime.now(_KST).date()
+    if args.symbols:
+        symbols = tuple(s.strip() for s in args.symbols.split(",") if s.strip())
+    elif args.from_records:
+        symbols = held_symbols_from_records(args.from_records, as_of=as_of)
+    else:
+        symbols = tuple(_load_json(args.universe, []))
+    if not symbols:
+        raise SystemExit("no symbols (pass --symbols/--from-records or provide data/universe-symbols.json)")
     names = _load_json(args.names, {})
     disclosure_provider = dart_disclosure_provider_or_none(
         symbols=symbols, cache_path=args.corp_code_cache, window_days=args.days)
