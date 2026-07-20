@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 from .account_state import AccountState, read_account_state
+from .daily_loss import DEFAULT_DAILY_LOSS_LEDGER, realized_loss_for, record_realized_trade
 from .gate import LIVE_OPERATOR_CONFIRMATION
 from .intent import Side
 from .kill_switch import (
@@ -57,6 +58,10 @@ def _kill_switch_path(args) -> str:
     return getattr(args, "kill_switch", None) or os.getenv("KIS_KILL_SWITCH") or DEFAULT_LIVE_KILL_SWITCH
 
 
+def _daily_loss_ledger(args) -> str:
+    return getattr(args, "daily_loss_ledger", None) or os.getenv("KIS_DAILY_LOSS_LEDGER") or DEFAULT_DAILY_LOSS_LEDGER
+
+
 def _normalize_account(raw: str) -> str:
     """Accept CANO-ACNT_PRDT_CD, or 10 bare digits, and return the dashed form."""
     account = raw.strip()
@@ -79,6 +84,8 @@ def _add_order_args(sub: argparse.ArgumentParser) -> None:
                      help=f"pilot per-order cap (default {PILOT_MAX_ORDER_NOTIONAL})")
     sub.add_argument("--max-positions", type=int, default=PILOT_MAX_POSITIONS,
                      help=f"max concurrent positions (default {PILOT_MAX_POSITIONS}); raise to trade alongside existing holdings")
+    sub.add_argument("--daily-loss-ledger", default=None,
+                     help=f"realized-loss ledger dir (default {DEFAULT_DAILY_LOSS_LEDGER})")
     sub.add_argument("--account-no", default=None, help="defaults to KIS_ACCOUNT_NO in .env")
 
 
@@ -97,6 +104,13 @@ def build_parser() -> argparse.ArgumentParser:
     halt.add_argument("--kill-switch", default=None)
     resume = sub.add_parser("resume", help="release the kill switch (manual re-enable)")
     resume.add_argument("--kill-switch", default=None)
+    loss = sub.add_parser("record-loss", help="record a closing sell's realized P&L into today's ledger")
+    loss.add_argument("--symbol", required=True)
+    loss.add_argument("--qty", required=True, type=int)
+    loss.add_argument("--sell-price", required=True, type=Decimal)
+    loss.add_argument("--avg-cost", required=True, type=Decimal)
+    loss.add_argument("--day", default=None, help="YYYY-MM-DD; defaults to today (KST)")
+    loss.add_argument("--daily-loss-ledger", default=None)
     recon = sub.add_parser("reconcile", help="read-only: did this order fill?")
     recon.add_argument("--symbol", required=True)
     recon.add_argument("--order-number", required=True)
@@ -153,15 +167,38 @@ def _run_resume(args) -> int:
     return 0
 
 
+def _run_record_loss(args) -> int:
+    ledger = _daily_loss_ledger(args)
+    day = args.day or datetime.now(_KST).date().isoformat()
+    realized = record_realized_trade(
+        ledger, day=day, symbol=args.symbol, quantity=args.qty,
+        sell_price=args.sell_price, avg_cost=args.avg_cost, recorded_at=datetime.now(_KST),
+    )
+    total_loss = realized_loss_for(ledger, day)
+    sys.stdout.write(
+        f"recorded {args.symbol} qty={args.qty}: realized P&L {realized} "
+        f"({'LOSS' if realized < 0 else 'gain'}); today's cumulative loss = {total_loss}\n"
+    )
+    return 0
+
+
 def _run_order_command(args, account_no: str) -> int:
     marker = read_kill_switch(_kill_switch_path(args))
     if marker is not None:
         sys.stdout.write(f"kill switch: ENGAGED ({marker.get('reason')}) — submit will be blocked\n")
+    signal_day = args.signal_date or datetime.now(_KST).date()
+    try:
+        daily_loss = realized_loss_for(_daily_loss_ledger(args), signal_day.isoformat())
+    except ValueError as exc:  # corrupt ledger -> fail closed, block trading
+        sys.stderr.write(f"REFUSING (nothing sent): {exc}\n")
+        return 2
+    if daily_loss > 0:
+        sys.stdout.write(f"today's realized loss: {daily_loss} (feeds the daily-loss circuit breaker)\n")
     state = _resolve_state(args, account_no)
     try:
         plan = build_pilot_order(
             symbol=args.symbol, side=Side(args.side), quantity=args.qty, limit_price=args.limit_price,
-            signal_date=args.signal_date or datetime.now(_KST).date(),
+            signal_date=signal_day, daily_loss=daily_loss,
             equity=state.equity, open_positions=state.open_positions,
             max_order_notional=args.max_notional, max_positions=args.max_positions,
         )
@@ -247,6 +284,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return _run_halt(args)
     if args.command == "resume":
         return _run_resume(args)
+    if args.command == "record-loss":
+        return _run_record_loss(args)
 
     account_no = _normalize_account(args.account_no or os.getenv("KIS_ACCOUNT_NO", ""))
     if not account_no:

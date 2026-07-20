@@ -176,6 +176,20 @@ class CliTests(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertIn("operator-confirm", err.getvalue())
 
+    def test_recorded_daily_loss_trips_the_circuit_breaker(self):
+        ledger = tempfile.mkdtemp()
+        day = "2026-07-21"
+        # equity 10,000,000 -> 3% daily-loss cap = 300,000. Record a 400,000 loss.
+        with contextlib.redirect_stdout(io.StringIO()):
+            pilot_cli.main(["record-loss", "--symbol", "005930", "--qty", "10",
+                            "--sell-price", "60000", "--avg-cost", "100000",  # -400,000
+                            "--day", day, "--daily-loss-ledger", ledger])
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            rc = pilot_cli.main(["preflight", *self._BASE, "--as-of", day, "--daily-loss-ledger", ledger])
+        self.assertEqual(rc, 2)
+        self.assertIn("daily loss", err.getvalue())
+
     def test_halt_then_submit_is_blocked_then_resume(self):
         switch = str(Path(tempfile.mkdtemp()) / "ks.json")
         # halt
