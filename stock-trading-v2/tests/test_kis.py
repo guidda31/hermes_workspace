@@ -180,6 +180,66 @@ class KisClientTests(unittest.TestCase):
         )
         response.raise_for_status.assert_called_once_with()
 
+    def test_inquire_buyable_cash_gets_expected_headers_and_query_parameters(self) -> None:
+        from decimal import Decimal
+        response = MagicMock()
+        response.json.return_value = {"output": {"ord_psbl_cash": "1000000", "max_buy_qty": "20"}}
+        session = MagicMock()
+        session.get.return_value = response
+        client = KisClient(
+            credentials=KisCredentials(app_key="test-app-key", app_secret="test-app-secret"),
+            session=session,
+        )
+
+        payload = client.inquire_buyable_cash(
+            "test-access-token", "12345678-01", symbol="086790", limit_price=Decimal("50000"))
+
+        self.assertEqual(payload["output"]["ord_psbl_cash"], "1000000")
+        session.get.assert_called_once_with(
+            "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/trading/inquire-psbl-order",
+            headers={
+                "authorization": "Bearer test-access-token",
+                "appkey": "test-app-key",
+                "appsecret": "test-app-secret",
+                "tr_id": "TTTC8908R",
+                "custtype": "P",
+            },
+            params={
+                "CANO": "12345678",
+                "ACNT_PRDT_CD": "01",
+                "PDNO": "086790",
+                "ORD_UNPR": "50000",
+                "ORD_DVSN": "00",
+                "CMA_EVLU_AMT_ICLD_YN": "N",
+                "OVRS_ICLD_YN": "N",
+            },
+        )
+        response.raise_for_status.assert_called_once_with()
+
+    def test_inquire_buyable_cash_rejects_invalid_account_number(self) -> None:
+        from decimal import Decimal
+        session = MagicMock()
+        client = KisClient(
+            credentials=KisCredentials(app_key="test-app-key", app_secret="test-app-secret"),
+            session=session,
+        )
+        with self.assertRaises(ValueError):
+            client.inquire_buyable_cash("t", "12345678_01", symbol="086790", limit_price=Decimal("50000"))
+        session.get.assert_not_called()
+
+    def test_inquire_buyable_cash_rejects_non_object_json_response(self) -> None:
+        from decimal import Decimal
+        response = MagicMock()
+        response.json.return_value = []
+        session = MagicMock()
+        session.get.return_value = response
+        client = KisClient(
+            credentials=KisCredentials(app_key="test-app-key", app_secret="test-app-secret"),
+            session=session,
+        )
+        with self.assertRaises(ValueError):
+            client.inquire_buyable_cash("t", "12345678-01", symbol="086790", limit_price=Decimal("50000"))
+
     def test_inquire_balance_rejects_invalid_account_number(self) -> None:
         session = MagicMock()
         client = KisClient(

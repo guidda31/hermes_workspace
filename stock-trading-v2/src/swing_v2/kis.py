@@ -20,6 +20,10 @@ _INQUIRE_BALANCE_URL = (
     "https://openapi.koreainvestment.com:9443/"
     "uapi/domestic-stock/v1/trading/inquire-balance"
 )
+_INQUIRE_PSBL_ORDER_URL = (
+    "https://openapi.koreainvestment.com:9443/"
+    "uapi/domestic-stock/v1/trading/inquire-psbl-order"
+)
 _INQUIRE_DAILY_ITEM_CHART_PRICE_URL = (
     "https://openapi.koreainvestment.com:9443/"
     "uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice"
@@ -172,6 +176,51 @@ class KisClient:
         payload = response.json()
         if not isinstance(payload, dict):
             raise ValueError("KIS balance response must be a JSON object")
+        return payload
+
+    def inquire_buyable_cash(
+        self, access_token: str, account_number: str, *, symbol: str,
+        limit_price: Decimal, order_division: str = "00",
+    ) -> dict[str, Any]:
+        """Return the read-only KIS buyable-cash/quantity response for a symbol.
+
+        This is the order-readiness read (`inquire-psbl-order`, TR ``TTTC8908R``): it
+        proves the account's order scope and reports 주문가능현금/최대매수수량 WITHOUT
+        placing any order. ``order_division`` "00" is 지정가 (uses ``limit_price``).
+        """
+        cano, separator, account_product_code = account_number.partition("-")
+        if (
+            separator != "-"
+            or not cano.isdigit()
+            or len(cano) != 8
+            or not account_product_code.isdigit()
+            or len(account_product_code) != 2
+        ):
+            raise ValueError("account_number must have the form CANO-ACNT_PRDT_CD")
+        if type(symbol) is not str or not symbol:
+            raise ValueError("symbol must be a nonempty plain str")
+        if type(limit_price) is not Decimal or not limit_price.is_finite() or limit_price < 0:
+            raise ValueError("limit_price must be a nonnegative finite Decimal")
+
+        response = self._session.get(
+            _INQUIRE_PSBL_ORDER_URL,
+            headers={
+                "authorization": f"Bearer {access_token}",
+                "appkey": self._credentials.app_key,
+                "appsecret": self._credentials.app_secret,
+                "tr_id": "TTTC8908R",
+                "custtype": "P",
+            },
+            params={
+                "CANO": cano, "ACNT_PRDT_CD": account_product_code,
+                "PDNO": symbol, "ORD_UNPR": format(limit_price.normalize(), "f"),
+                "ORD_DVSN": order_division, "CMA_EVLU_AMT_ICLD_YN": "N", "OVRS_ICLD_YN": "N",
+            },
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("KIS buyable-cash response must be a JSON object")
         return payload
 
     def load_domestic_daily_bars(
