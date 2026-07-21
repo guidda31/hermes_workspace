@@ -32,6 +32,13 @@ from typing import Optional, Sequence
 
 from .account_state import AccountState, read_account_state
 from .daily_loss import DEFAULT_DAILY_LOSS_LEDGER, realized_loss_for, record_realized_trade
+from .decision_order import (
+    admitted_buy_decisions,
+    latest_record_path,
+    load_record,
+    sized_quantity,
+    snapshot_close,
+)
 from .gate import LIVE_OPERATOR_CONFIRMATION
 from .intent import Side
 from .kill_switch import (
@@ -111,6 +118,23 @@ def build_parser() -> argparse.ArgumentParser:
     loss.add_argument("--avg-cost", required=True, type=Decimal)
     loss.add_argument("--day", default=None, help="YYYY-MM-DD; defaults to today (KST)")
     loss.add_argument("--daily-loss-ledger", default=None)
+    fromdec = sub.add_parser("from-decision",
+                             help="build the order from the AI's forward BUY decision (AI picks the stock)")
+    fromdec.add_argument("--record", default=None, help="forward record path (default: latest)")
+    fromdec.add_argument("--records-dir", default="data/forward-records")
+    fromdec.add_argument("--symbol", default=None, help="choose one when the AI picked several BUYs")
+    fromdec.add_argument("--snapshot", default=None, help="price snapshot (default: forward-<signal_date>.json)")
+    fromdec.add_argument("--limit-price", type=Decimal, default=None, help="override; else the snapshot close")
+    fromdec.add_argument("--equity", type=Decimal, default=None, help="override; else the live balance")
+    fromdec.add_argument("--open-positions", type=int, default=0)
+    fromdec.add_argument("--max-notional", type=Decimal, default=PILOT_MAX_ORDER_NOTIONAL)
+    fromdec.add_argument("--max-positions", type=int, default=PILOT_MAX_POSITIONS)
+    fromdec.add_argument("--daily-loss-ledger", default=None)
+    fromdec.add_argument("--account-no", default=None)
+    fromdec.add_argument("--arm", action="store_true", help="required to actually place the order")
+    fromdec.add_argument("--operator-confirm", default="", help=f'must equal "{LIVE_OPERATOR_CONFIRMATION}"')
+    fromdec.add_argument("--audit-dir", default="data/live-audit")
+    fromdec.add_argument("--kill-switch", default=None)
     recon = sub.add_parser("reconcile", help="read-only: did this order fill?")
     recon.add_argument("--symbol", required=True)
     recon.add_argument("--order-number", required=True)
@@ -205,22 +229,26 @@ def _run_order_command(args, account_no: str) -> int:
     except ValueError as exc:
         sys.stderr.write(f"pretrade REJECTED (nothing sent): {exc}\n")
         return 2
-    sys.stdout.write(describe_pilot_plan(plan, account_number=account_no))
+    return _present_and_submit(args, plan, account_no, submit_requested=(args.command == "submit"))
 
-    if args.command == "preflight":
+
+def _present_and_submit(args, plan, account_no: str, *, submit_requested: bool) -> int:
+    """Print the plan; if a submit is requested, run the gates then place + reconcile."""
+    sys.stdout.write(describe_pilot_plan(plan, account_number=account_no))
+    if not submit_requested:
         return 0
 
-    # submit path — independent gates before any network call
+    # independent gates before any network call
     kill_switch = _kill_switch_path(args)
     try:
         require_not_halted(kill_switch)  # fail-closed: engaged/corrupt switch blocks everything
     except LiveTradingHalted as exc:
         sys.stderr.write(f"\nREFUSING to submit: {exc}\n(release with `resume --kill-switch {kill_switch}`)\n")
         return 2
-    if not args.arm:
+    if not getattr(args, "arm", False):
         sys.stderr.write("\nREFUSING to submit: pass --arm to place this real order.\n")
         return 2
-    if args.operator_confirm != LIVE_OPERATOR_CONFIRMATION:
+    if getattr(args, "operator_confirm", "") != LIVE_OPERATOR_CONFIRMATION:
         sys.stderr.write(f'\nREFUSING to submit: --operator-confirm must equal "{LIVE_OPERATOR_CONFIRMATION}".\n')
         return 2
 
@@ -232,7 +260,7 @@ def _run_order_command(args, account_no: str) -> int:
     token = _access_token(credentials)
     client = KisProductionTradingClient(
         credentials=credentials, access_token=token, account_number=account_no,
-        session=requests.Session(), audit_writer=IntentAuditWriter(args.audit_dir),
+        session=requests.Session(), audit_writer=IntentAuditWriter(getattr(args, "audit_dir", "data/live-audit")),
     )
     sys.stdout.write("\n*** ARMED — placing a REAL order on a REAL account ***\n")
     ack = submit_pilot_order(plan, client=client, operator_confirmation=args.operator_confirm,
@@ -248,6 +276,71 @@ def _run_order_command(args, account_no: str) -> int:
     except Exception as exc:  # noqa: BLE001 - reconciliation is advisory, never mask the accepted order
         sys.stdout.write(f"reconcile: unavailable ({type(exc).__name__}); check the account manually\n")
     return 0
+
+
+def _run_from_decision(args, account_no: str) -> int:
+    """Build the order from the AI's forward-observation BUY decision (AI picks the stock)."""
+    records_dir = args.records_dir
+    record_path = args.record or latest_record_path(records_dir)
+    if record_path is None:
+        sys.stderr.write(f"no forward records in {records_dir}; run the AI decision first\n")
+        return 2
+    record = load_record(record_path)
+    signal_day = date.fromisoformat(record["signal_date"])
+    buys = admitted_buy_decisions(record)
+    if not buys:
+        sys.stdout.write(f"AI made no admitted BUY on {record['signal_date']} (e.g. all HOLD) — nothing to order.\n")
+        return 0
+
+    symbols = [d["symbol"] for d in buys]
+    if args.symbol is not None:
+        chosen = next((d for d in buys if d["symbol"] == args.symbol), None)
+        if chosen is None:
+            sys.stderr.write(f"--symbol {args.symbol} is not an AI BUY pick; choose from {symbols}\n")
+            return 2
+    elif len(buys) == 1:
+        chosen = buys[0]
+    else:
+        sys.stderr.write(f"AI picked several BUYs {symbols}; pass --symbol to choose one\n")
+        return 2
+
+    snapshot = args.snapshot or f"data/snapshots/forward-{record['signal_date']}.json"
+    try:
+        limit_price = args.limit_price if args.limit_price is not None else snapshot_close(snapshot, chosen["symbol"])
+    except (OSError, ValueError) as exc:
+        sys.stderr.write(f"could not resolve a limit price ({exc}); pass --limit-price\n")
+        return 2
+
+    try:
+        daily_loss = realized_loss_for(_daily_loss_ledger(args), signal_day.isoformat())
+    except ValueError as exc:
+        sys.stderr.write(f"REFUSING (nothing sent): {exc}\n")
+        return 2
+    state = _resolve_state(args, account_no)
+
+    quantity, clamped = sized_quantity(
+        target_weight=Decimal(str(chosen["target_weight"])), equity=state.equity,
+        limit_price=limit_price, max_order_notional=args.max_notional)
+    sys.stdout.write(
+        f"AI pick from {Path(record_path).name}: BUY {chosen['symbol']} "
+        f"target_weight={chosen['target_weight']} conviction={chosen.get('conviction')}\n"
+        f"sized qty={quantity} @ {limit_price}{' (CLAMPED to pilot cap)' if clamped else ''}\n"
+    )
+    if quantity < 1:
+        sys.stderr.write("sized quantity is below one share at this price/cap; nothing to order\n")
+        return 2
+
+    try:
+        plan = build_pilot_order(
+            symbol=chosen["symbol"], side=Side.BUY, quantity=quantity, limit_price=limit_price,
+            signal_date=signal_day, daily_loss=daily_loss, equity=state.equity,
+            open_positions=state.open_positions, max_order_notional=args.max_notional,
+            max_positions=args.max_positions,
+        )
+    except ValueError as exc:
+        sys.stderr.write(f"pretrade REJECTED (nothing sent): {exc}\n")
+        return 2
+    return _present_and_submit(args, plan, account_no, submit_requested=bool(args.arm))
 
 
 def _reconcile(credentials, token, account_no, *, order_number, symbol, day):
@@ -294,6 +387,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if args.command == "reconcile":
         return _run_reconcile(args, account_no)
+    if args.command == "from-decision":
+        return _run_from_decision(args, account_no)
     return _run_order_command(args, account_no)
 
 

@@ -176,6 +176,52 @@ class CliTests(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertIn("operator-confirm", err.getvalue())
 
+    def _decision_dirs(self, decisions, admitted, close="50000"):
+        import json
+        rec_dir = tempfile.mkdtemp()
+        snap_dir = tempfile.mkdtemp()
+        Path(rec_dir, "signal-2026-07-20.json").write_text(json.dumps({
+            "signal_date": "2026-07-20", "admitted_symbols": admitted, "decisions": decisions}), encoding="utf-8")
+        Path(snap_dir, "forward-2026-07-20.json").write_text(
+            json.dumps({"histories": {d["symbol"]: [{"trade_date": "2026-07-20", "close": close}]
+                                      for d in decisions}}),
+            encoding="utf-8")
+        return rec_dir, snap_dir
+
+    def test_from_decision_previews_ai_pick(self):
+        rec, snap = self._decision_dirs(
+            [{"action": "BUY", "symbol": "086790", "target_weight": "0.18", "conviction": "0.72"}], ["086790"])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = pilot_cli.main(["from-decision", "--records-dir", rec,
+                                 "--snapshot", str(Path(snap, "forward-2026-07-20.json")),
+                                 "--equity", "10000000", "--account-no", "12345678-01"])
+        self.assertEqual(rc, 0)
+        self.assertIn("AI pick", out.getvalue())
+        self.assertIn("086790", out.getvalue())
+        self.assertIn("DRY-RUN", out.getvalue())  # no --arm -> preview only
+
+    def test_from_decision_all_hold_orders_nothing(self):
+        rec, snap = self._decision_dirs(
+            [{"action": "HOLD", "symbol": "086790", "target_weight": "0.18"}], ["086790"])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = pilot_cli.main(["from-decision", "--records-dir", rec, "--equity", "10000000",
+                                 "--account-no", "12345678-01"])
+        self.assertEqual(rc, 0)
+        self.assertIn("no admitted BUY", out.getvalue())
+
+    def test_from_decision_requires_symbol_when_multiple(self):
+        rec, snap = self._decision_dirs([
+            {"action": "BUY", "symbol": "105560", "target_weight": "0.18"},
+            {"action": "BUY", "symbol": "086790", "target_weight": "0.18"}], ["105560", "086790"])
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            rc = pilot_cli.main(["from-decision", "--records-dir", rec, "--equity", "10000000",
+                                 "--account-no", "12345678-01"])
+        self.assertEqual(rc, 2)
+        self.assertIn("--symbol", err.getvalue())
+
     def test_recorded_daily_loss_trips_the_circuit_breaker(self):
         ledger = tempfile.mkdtemp()
         day = "2026-07-21"
