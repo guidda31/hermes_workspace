@@ -52,6 +52,13 @@ from .decision_order import (
 )
 from .gate import LIVE_OPERATOR_CONFIRMATION
 from .intent import Side
+from .realized_settlement import (
+    DEFAULT_PENDING_SELLS,
+    load_pending_sells,
+    record_pending_sell,
+    rewrite_pending_sells,
+    settle,
+)
 from .kill_switch import (
     DEFAULT_LIVE_KILL_SWITCH,
     LiveTradingHalted,
@@ -117,6 +124,8 @@ def build_parser() -> argparse.ArgumentParser:
     submit.add_argument("--operator-confirm", default="", help=f'must equal "{LIVE_OPERATOR_CONFIRMATION}"')
     submit.add_argument("--audit-dir", default="data/live-audit")
     submit.add_argument("--kill-switch", default=None, help=f"halt marker path (default {DEFAULT_LIVE_KILL_SWITCH})")
+    submit.add_argument("--pending-sells", default=None,
+                        help=f"where a SELL's cost basis is captured for later settle (default {DEFAULT_PENDING_SELLS})")
     halt = sub.add_parser("halt", help="engage the kill switch: block all live submissions")
     halt.add_argument("--reason", required=True)
     halt.add_argument("--kill-switch", default=None)
@@ -158,6 +167,11 @@ def build_parser() -> argparse.ArgumentParser:
     auth.add_argument("--confirm", required=True, help=f'must equal "{AUTONOMOUS_CONFIRMATION}"')
     auth.add_argument("--auth-file", default=None)
 
+    settle_p = sub.add_parser("settle", help="settle filled SELLs -> auto-record realized loss")
+    settle_p.add_argument("--pending-sells", default=None)
+    settle_p.add_argument("--daily-loss-ledger", default=None)
+    settle_p.add_argument("--date", default=None, help="YYYYMMDD fills window / YYYY-MM-DD ledger day; default today")
+    settle_p.add_argument("--account-no", default=None)
     recon = sub.add_parser("reconcile", help="read-only: did this order fill?")
     recon.add_argument("--symbol", required=True)
     recon.add_argument("--order-number", required=True)
@@ -252,10 +266,16 @@ def _run_order_command(args, account_no: str) -> int:
     except ValueError as exc:
         sys.stderr.write(f"pretrade REJECTED (nothing sent): {exc}\n")
         return 2
-    return _present_and_submit(args, plan, account_no, submit_requested=(args.command == "submit"))
+    # For a SELL, capture the pre-sale cost basis so realized loss can be settled on fill.
+    sell_avg_cost = None
+    if Side(args.side) is Side.SELL:
+        held = next((h for h in state.holdings if h.symbol == args.symbol), None)
+        sell_avg_cost = held.avg_price if held is not None else None
+    return _present_and_submit(args, plan, account_no,
+                               submit_requested=(args.command == "submit"), sell_avg_cost=sell_avg_cost)
 
 
-def _present_and_submit(args, plan, account_no: str, *, submit_requested: bool) -> int:
+def _present_and_submit(args, plan, account_no: str, *, submit_requested: bool, sell_avg_cost=None) -> int:
     """Print the plan; if a submit is requested, run the gates then place + reconcile."""
     sys.stdout.write(describe_pilot_plan(plan, account_number=account_no))
     if not submit_requested:
@@ -275,8 +295,20 @@ def _present_and_submit(args, plan, account_no: str, *, submit_requested: bool) 
         sys.stderr.write(f'\nREFUSING to submit: --operator-confirm must equal "{LIVE_OPERATOR_CONFIRMATION}".\n')
         return 2
 
-    _place_order(args, plan, account_no, operator_confirmation=args.operator_confirm, kill_switch_path=kill_switch)
+    ack = _place_order(args, plan, account_no, operator_confirmation=args.operator_confirm,
+                       kill_switch_path=kill_switch)
+    _capture_sell_cost(args, plan, ack, sell_avg_cost)
     return 0
+
+
+def _capture_sell_cost(args, plan, ack, sell_avg_cost) -> None:
+    """After a placed SELL, persist its cost basis so `settle` can record realized loss."""
+    if ack is None or plan.intent.side is not Side.SELL or sell_avg_cost is None:
+        return
+    pending = getattr(args, "pending_sells", None) or os.getenv("KIS_PENDING_SELLS") or DEFAULT_PENDING_SELLS
+    record_pending_sell(pending, order_number=ack.order_number, symbol=plan.intent.symbol,
+                        quantity=plan.intent.quantity, avg_cost=sell_avg_cost, at=datetime.now(_KST))
+    sys.stdout.write(f"captured SELL cost basis for realized-loss settle (run `settle` after the fill)\n")
 
 
 def _place_order(args, plan, account_no: str, *, operator_confirmation: str, kill_switch_path: str):
@@ -424,6 +456,44 @@ def _reconcile(credentials, token, account_no, *, order_number, symbol, day):
     return reconcile_via_client(client, order_number=order_number, symbol=symbol, start=day, end=day)
 
 
+def _run_settle(args, account_no: str) -> int:
+    """Reconcile outstanding SELLs; auto-record realized loss for the ones that filled."""
+    pending_path = args.pending_sells or os.getenv("KIS_PENDING_SELLS") or DEFAULT_PENDING_SELLS
+    ledger = _daily_loss_ledger(args)
+    fills_day = args.date or datetime.now(_KST).strftime("%Y%m%d")
+    ledger_day = datetime.strptime(fills_day, "%Y%m%d").date().isoformat() if len(fills_day) == 8 else fills_day
+    try:
+        pending = load_pending_sells(pending_path)
+    except ValueError as exc:
+        sys.stderr.write(f"REFUSING: {exc}\n")
+        return 2
+    if not pending:
+        sys.stdout.write("no pending SELLs to settle.\n")
+        return 0
+
+    credentials = _credentials()
+    token = _access_token(credentials)
+    import requests
+    from .production_reconciliation import KisProductionReconciliationClient
+    client = KisProductionReconciliationClient(
+        credentials=credentials, access_token=token, account_number=account_no, session=requests.Session())
+    reconciliations = {
+        p.order_number: reconcile_via_client(client, order_number=p.order_number, symbol=p.symbol,
+                                              start=fills_day, end=fills_day)
+        for p in pending
+    }
+    settled, remaining = settle(pending, reconciliations)
+    for s in settled:
+        record_realized_trade(ledger, day=ledger_day, symbol=s.symbol, quantity=s.quantity,
+                              sell_price=s.sell_price, avg_cost=s.avg_cost, recorded_at=datetime.now(_KST))
+        sys.stdout.write(
+            f"settled {s.symbol} x{s.quantity} @ {s.sell_price}: realized {s.realized_pnl} "
+            f"({'LOSS' if s.realized_pnl < 0 else 'gain'}) -> recorded to daily-loss ledger\n")
+    rewrite_pending_sells(pending_path, remaining)
+    sys.stdout.write(f"settled {len(settled)}, still pending {len(remaining)}.\n")
+    return 0
+
+
 def _run_reconcile(args, account_no: str) -> int:
     credentials = _credentials()
     token = _access_token(credentials)
@@ -462,6 +532,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if args.command == "reconcile":
         return _run_reconcile(args, account_no)
+    if args.command == "settle":
+        return _run_settle(args, account_no)
     if args.command == "from-decision":
         return _run_from_decision(args, account_no)
     return _run_order_command(args, account_no)

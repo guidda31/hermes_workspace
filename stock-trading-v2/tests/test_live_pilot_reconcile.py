@@ -49,7 +49,7 @@ class ReconcileOrderTest(unittest.TestCase):
             order_number=_NUMBER, symbol=_SYMBOL,
             open_orders=(), fills=(fill(quantity=3, filled=3),),
         )
-        self.assertEqual(result, OrderReconciliation(_NUMBER, _SYMBOL, 3, 0, STATUS_FILLED))
+        self.assertEqual(result, OrderReconciliation(_NUMBER, _SYMBOL, 3, 0, STATUS_FILLED, Decimal("71000")))
 
     def test_partial_fill_reports_partial(self) -> None:
         result = reconcile_order(
@@ -57,7 +57,7 @@ class ReconcileOrderTest(unittest.TestCase):
             open_orders=(open_order(quantity=3, filled=1),),
             fills=(fill(quantity=3, filled=1),),
         )
-        self.assertEqual(result, OrderReconciliation(_NUMBER, _SYMBOL, 1, 2, STATUS_PARTIAL))
+        self.assertEqual(result, OrderReconciliation(_NUMBER, _SYMBOL, 1, 2, STATUS_PARTIAL, Decimal("71000")))
 
     def test_resting_only_reports_open(self) -> None:
         result = reconcile_order(
@@ -88,7 +88,7 @@ class ReconcileOrderTest(unittest.TestCase):
             open_orders=(),
             fills=(fill(quantity=5, filled=2), fill(quantity=5, filled=3)),
         )
-        self.assertEqual(result, OrderReconciliation(_NUMBER, _SYMBOL, 5, 0, STATUS_FILLED))
+        self.assertEqual(result, OrderReconciliation(_NUMBER, _SYMBOL, 5, 0, STATUS_FILLED, Decimal("71000")))
 
     def test_rejects_wrong_element_type(self) -> None:
         with self.assertRaises(ValueError):
@@ -112,7 +112,7 @@ class ReconcileViaClientTest(unittest.TestCase):
         result = reconcile_via_client(
             client, order_number=_NUMBER, symbol=_SYMBOL, start="20260701", end="20260719",
         )
-        self.assertEqual(result, OrderReconciliation(_NUMBER, _SYMBOL, 1, 3, STATUS_PARTIAL))
+        self.assertEqual(result, OrderReconciliation(_NUMBER, _SYMBOL, 1, 3, STATUS_PARTIAL, Decimal("71000")))
         self.assertEqual(client.fill_range, ("20260701", "20260719"))
 
     def test_filled_through_fake_client(self) -> None:

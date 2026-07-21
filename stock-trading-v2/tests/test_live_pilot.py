@@ -222,6 +222,38 @@ class CliTests(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertIn("--symbol", err.getvalue())
 
+    def test_settle_auto_records_realized_loss_from_filled_sell(self):
+        from datetime import datetime, timezone
+        from decimal import Decimal
+        from swing_v2.live import pilot_cli as pc
+        from swing_v2.live.daily_loss import realized_loss_for
+        from swing_v2.live.pilot_reconcile import STATUS_FILLED, OrderReconciliation
+        from swing_v2.live.realized_settlement import record_pending_sell
+
+        pending = str(Path(tempfile.mkdtemp()) / "pending.jsonl")
+        ledger = tempfile.mkdtemp()
+        record_pending_sell(pending, order_number="0000000123", symbol="005930",
+                            quantity=10, avg_cost=Decimal("71000"), at=datetime.now(timezone.utc))
+        # stub the broker reader + credentials/token so no network is touched
+        self.addCleanup(setattr, pc, "_credentials", pc._credentials)
+        self.addCleanup(setattr, pc, "_access_token", pc._access_token)
+        self.addCleanup(setattr, pc, "reconcile_via_client", pc.reconcile_via_client)
+        import swing_v2.live.production_reconciliation as pr
+        self.addCleanup(setattr, pr, "KisProductionReconciliationClient", pr.KisProductionReconciliationClient)
+        pc._credentials = lambda: object()
+        pc._access_token = lambda creds: "tok"
+        pr.KisProductionReconciliationClient = lambda **kw: object()
+        pc.reconcile_via_client = lambda client, **kw: OrderReconciliation(
+            "0000000123", "005930", 10, 0, STATUS_FILLED, Decimal("69000"))  # sold below cost
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = pc.main(["settle", "--pending-sells", pending, "--daily-loss-ledger", ledger,
+                          "--date", "20260721", "--account-no", "12345678-01"])
+        self.assertEqual(rc, 0)
+        self.assertIn("realized -20000", out.getvalue())
+        self.assertEqual(realized_loss_for(ledger, "2026-07-21"), Decimal("20000"))  # auto-recorded
+
     def test_authorize_autonomous_writes_file(self):
         auth = str(Path(tempfile.mkdtemp()) / "auth.json")
         from swing_v2.live.autonomous import AUTONOMOUS_CONFIRMATION, load_authorization

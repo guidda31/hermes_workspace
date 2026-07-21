@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from decimal import Decimal
 
 from .production_reconciliation import OpenOrder, OrderFill
 
@@ -28,6 +29,7 @@ class OrderReconciliation:
     filled_quantity: int
     open_quantity: int
     status: str
+    average_fill_price: Decimal | None = None
 
     def __post_init__(self) -> None:
         if type(self.order_number) is not str or not self.order_number:
@@ -40,6 +42,11 @@ class OrderReconciliation:
             raise ValueError("open_quantity must be a nonnegative int")
         if self.status not in _STATUSES:
             raise ValueError("status must be a known reconciliation status")
+        if self.average_fill_price is not None and (
+            type(self.average_fill_price) is not Decimal
+            or not self.average_fill_price.is_finite() or self.average_fill_price <= 0
+        ):
+            raise ValueError("average_fill_price must be a positive finite Decimal or None")
 
 
 def _plain_identifier(value: object, name: str) -> str:
@@ -77,10 +84,12 @@ def reconcile_order(
 
     matched = False
     filled_quantity = 0
+    weighted_price = Decimal("0")
     for entry in recorded:
         if entry.order_number == number and entry.symbol == ticker:
             matched = True
             filled_quantity += entry.filled_quantity
+            weighted_price += Decimal(entry.filled_quantity) * entry.average_fill_price
 
     open_quantity = 0
     for entry in orders:
@@ -101,7 +110,8 @@ def reconcile_order(
     else:
         status = STATUS_NOT_FOUND
 
-    return OrderReconciliation(number, ticker, filled_quantity, open_quantity, status)
+    avg_fill_price = (weighted_price / Decimal(filled_quantity)) if filled_quantity > 0 else None
+    return OrderReconciliation(number, ticker, filled_quantity, open_quantity, status, avg_fill_price)
 
 
 def reconcile_via_client(
