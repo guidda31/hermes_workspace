@@ -31,6 +31,17 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 from .account_state import AccountState, read_account_state
+from .autonomous import (
+    AUTONOMOUS_CONFIRMATION,
+    DEFAULT_AUTH_FILE,
+    DEFAULT_ORDER_BUDGET_DIR,
+    AutonomousBlocked,
+    day_order_usage,
+    is_krx_regular_session,
+    record_order,
+    require_autonomous_authorized,
+    write_authorization,
+)
 from .daily_loss import DEFAULT_DAILY_LOSS_LEDGER, realized_loss_for, record_realized_trade
 from .decision_order import (
     admitted_buy_decisions,
@@ -135,6 +146,18 @@ def build_parser() -> argparse.ArgumentParser:
     fromdec.add_argument("--operator-confirm", default="", help=f'must equal "{LIVE_OPERATOR_CONFIRMATION}"')
     fromdec.add_argument("--audit-dir", default="data/live-audit")
     fromdec.add_argument("--kill-switch", default=None)
+    fromdec.add_argument("--autonomous", action="store_true",
+                         help="UNATTENDED: auto-arm via a durable authorization file (no human confirm)")
+    fromdec.add_argument("--auth-file", default=None, help=f"autonomous authorization (default {DEFAULT_AUTH_FILE})")
+    fromdec.add_argument("--order-budget-dir", default=None, help=f"per-day order budget (default {DEFAULT_ORDER_BUDGET_DIR})")
+
+    auth = sub.add_parser("authorize-autonomous", help="operator opt-in: write the bounded autonomous authorization")
+    auth.add_argument("--expires", required=True, help="YYYY-MM-DD (KST); authorization expires at this day's start")
+    auth.add_argument("--max-orders", required=True, type=int, help="max orders per day")
+    auth.add_argument("--max-notional", required=True, type=Decimal, help="max total notional per day")
+    auth.add_argument("--confirm", required=True, help=f'must equal "{AUTONOMOUS_CONFIRMATION}"')
+    auth.add_argument("--auth-file", default=None)
+
     recon = sub.add_parser("reconcile", help="read-only: did this order fill?")
     recon.add_argument("--symbol", required=True)
     recon.add_argument("--order-number", required=True)
@@ -252,6 +275,12 @@ def _present_and_submit(args, plan, account_no: str, *, submit_requested: bool) 
         sys.stderr.write(f'\nREFUSING to submit: --operator-confirm must equal "{LIVE_OPERATOR_CONFIRMATION}".\n')
         return 2
 
+    _place_order(args, plan, account_no, operator_confirmation=args.operator_confirm, kill_switch_path=kill_switch)
+    return 0
+
+
+def _place_order(args, plan, account_no: str, *, operator_confirmation: str, kill_switch_path: str):
+    """Build the production client, submit through the gate, then best-effort reconcile."""
     import requests
     from .audit import IntentAuditWriter
     from .production_execution import KisProductionTradingClient
@@ -263,11 +292,9 @@ def _present_and_submit(args, plan, account_no: str, *, submit_requested: bool) 
         session=requests.Session(), audit_writer=IntentAuditWriter(getattr(args, "audit_dir", "data/live-audit")),
     )
     sys.stdout.write("\n*** ARMED — placing a REAL order on a REAL account ***\n")
-    ack = submit_pilot_order(plan, client=client, operator_confirmation=args.operator_confirm,
-                             kill_switch_path=kill_switch)
+    ack = submit_pilot_order(plan, client=client, operator_confirmation=operator_confirmation,
+                             kill_switch_path=kill_switch_path)
     sys.stdout.write(f"ACCEPTED by KIS: org={ack.forwarding_order_organization} order_no={ack.order_number}\n")
-
-    # best-effort fill reconciliation (fills can lag; a miss here is not an order failure)
     try:
         today = datetime.now(_KST).strftime("%Y%m%d")
         recon = _reconcile(credentials, token, account_no,
@@ -275,7 +302,7 @@ def _present_and_submit(args, plan, account_no: str, *, submit_requested: bool) 
         sys.stdout.write(f"reconcile: {recon.status} filled={recon.filled_quantity} open={recon.open_quantity}\n")
     except Exception as exc:  # noqa: BLE001 - reconciliation is advisory, never mask the accepted order
         sys.stdout.write(f"reconcile: unavailable ({type(exc).__name__}); check the account manually\n")
-    return 0
+    return ack
 
 
 def _run_from_decision(args, account_no: str) -> int:
@@ -340,7 +367,53 @@ def _run_from_decision(args, account_no: str) -> int:
     except ValueError as exc:
         sys.stderr.write(f"pretrade REJECTED (nothing sent): {exc}\n")
         return 2
+    if getattr(args, "autonomous", False):
+        return _submit_autonomous(args, plan, account_no)
     return _present_and_submit(args, plan, account_no, submit_requested=bool(args.arm))
+
+
+def _submit_autonomous(args, plan, account_no: str) -> int:
+    """Unattended submit: no human confirm — a durable, expiring, budgeted authorization
+    plus market-hours + kill-switch, all fail-closed, stand in for the human gate."""
+    sys.stdout.write(describe_pilot_plan(plan, account_number=account_no))
+    now = datetime.now(_KST)
+    if not is_krx_regular_session(now):
+        sys.stderr.write("REFUSING (autonomous): outside KRX regular hours (Mon-Fri 09:00-15:30 KST)\n")
+        return 2
+    kill_switch = _kill_switch_path(args)
+    try:
+        require_not_halted(kill_switch)
+    except LiveTradingHalted as exc:
+        sys.stderr.write(f"REFUSING (autonomous): {exc}\n")
+        return 2
+    budget_dir = args.order_budget_dir or os.getenv("KIS_ORDER_BUDGET_DIR") or DEFAULT_ORDER_BUDGET_DIR
+    auth_file = args.auth_file or os.getenv("KIS_AUTH_FILE") or DEFAULT_AUTH_FILE
+    day = now.date().isoformat()
+    try:
+        orders_today, notional_today = day_order_usage(budget_dir, day)
+        phrase = require_autonomous_authorized(
+            auth_file, now=now, orders_today=orders_today,
+            notional_today=notional_today, next_notional=plan.notional)
+    except AutonomousBlocked as exc:
+        sys.stderr.write(f"REFUSING (autonomous): {exc}\n")
+        return 2
+    sys.stdout.write(f"autonomous authorized: order {orders_today + 1}, day-notional {notional_today}+{plan.notional}\n")
+    _place_order(args, plan, account_no, operator_confirmation=phrase, kill_switch_path=kill_switch)
+    record_order(budget_dir, day=day, symbol=plan.intent.symbol, notional=plan.notional, at=now)
+    return 0
+
+
+def _run_authorize_autonomous(args) -> int:
+    path = args.auth_file or os.getenv("KIS_AUTH_FILE") or DEFAULT_AUTH_FILE
+    expires_at = datetime.fromisoformat(args.expires).replace(tzinfo=_KST)
+    write_authorization(path, operator_confirmation=args.confirm, expires_at=expires_at,
+                        max_orders_per_day=args.max_orders, max_notional_per_day=args.max_notional)
+    sys.stdout.write(
+        f"autonomous authorization written to {path}: expires {expires_at.date()}, "
+        f"max {args.max_orders} orders/day, max {args.max_notional} notional/day.\n"
+        f"(kill switch, market hours, and pretrade limits still apply; `resume`/`halt` override.)\n"
+    )
+    return 0
 
 
 def _reconcile(credentials, token, account_no, *, order_number, symbol, day):
@@ -379,6 +452,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return _run_resume(args)
     if args.command == "record-loss":
         return _run_record_loss(args)
+    if args.command == "authorize-autonomous":
+        return _run_authorize_autonomous(args)
 
     account_no = _normalize_account(args.account_no or os.getenv("KIS_ACCOUNT_NO", ""))
     if not account_no:

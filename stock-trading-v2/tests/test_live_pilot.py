@@ -222,6 +222,29 @@ class CliTests(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertIn("--symbol", err.getvalue())
 
+    def test_authorize_autonomous_writes_file(self):
+        auth = str(Path(tempfile.mkdtemp()) / "auth.json")
+        from swing_v2.live.autonomous import AUTONOMOUS_CONFIRMATION, load_authorization
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = pilot_cli.main(["authorize-autonomous", "--expires", "2027-01-01", "--max-orders", "2",
+                                 "--max-notional", "300000", "--confirm", AUTONOMOUS_CONFIRMATION,
+                                 "--auth-file", auth])
+        self.assertEqual(rc, 0)
+        self.assertTrue(load_authorization(auth).enabled)
+
+    def test_autonomous_without_authorization_refuses(self):
+        rec, snap = self._decision_dirs(
+            [{"action": "BUY", "symbol": "086790", "target_weight": "0.18", "conviction": "0.72"}], ["086790"])
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            rc = pilot_cli.main(["from-decision", "--records-dir", rec,
+                                 "--snapshot", str(Path(snap, "forward-2026-07-20.json")),
+                                 "--equity", "10000000", "--account-no", "12345678-01",
+                                 "--max-notional", "60000", "--autonomous",
+                                 "--auth-file", str(Path(tempfile.mkdtemp()) / "none.json")])
+        self.assertEqual(rc, 2)
+        self.assertIn("autonomous", err.getvalue().lower())
+
     def test_recorded_daily_loss_trips_the_circuit_breaker(self):
         ledger = tempfile.mkdtemp()
         day = "2026-07-21"
