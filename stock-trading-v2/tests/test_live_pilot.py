@@ -18,6 +18,7 @@ from swing_v2.live.audit import IntentAuditWriter
 from swing_v2.live.intent import Side
 from swing_v2.live.pilot import (
     PILOT_MAX_ORDER_NOTIONAL,
+    build_pilot_exit,
     build_pilot_order,
     describe_pilot_plan,
     submit_pilot_order,
@@ -83,6 +84,14 @@ class BuildPilotOrderTests(unittest.TestCase):
     def test_custom_cap_can_lower_but_still_enforced(self):
         with self.assertRaises(ValueError):
             _tiny_buy(limit_price=Decimal("60000"), max_order_notional=Decimal("50000"))
+
+    def test_exit_is_not_blocked_by_entry_caps(self):
+        # A full exit whose notional dwarfs the pilot BUY cap still validates (exits reduce risk).
+        plan = build_pilot_exit(symbol="006840", quantity=4, limit_price=Decimal("500000"),
+                                signal_date=date(2026, 7, 21), equity=Decimal("815535"), open_positions=1)
+        self.assertIs(plan.intent.side, Side.SELL)
+        self.assertEqual(plan.intent.quantity, 4)
+        self.assertEqual(plan.notional, Decimal("2000000"))  # far above the 100k BUY cap, yet allowed
 
 
 class DescribePilotPlanTests(unittest.TestCase):
@@ -200,6 +209,33 @@ class CliTests(unittest.TestCase):
         self.assertIn("AI pick", out.getvalue())
         self.assertIn("086790", out.getvalue())
         self.assertIn("DRY-RUN", out.getvalue())  # no --arm -> preview only
+
+    def test_from_decision_sell_full_exit_preview(self):
+        import json
+        from swing_v2.live import pilot_cli as pc
+        from swing_v2.live.account_state import AccountState, HeldPosition
+        rec = tempfile.mkdtemp()
+        snap = tempfile.mkdtemp()
+        Path(rec, "signal-2026-07-20.json").write_text(json.dumps({
+            "signal_date": "2026-07-20", "admitted_symbols": ["006840"],
+            "decisions": [{"action": "SELL", "symbol": "006840", "target_weight": "0", "conviction": "0.6"}]}),
+            encoding="utf-8")
+        Path(snap, "forward-2026-07-20.json").write_text(json.dumps({
+            "histories": {"006840": [{"trade_date": "2026-07-20", "close": "20000"}]}}), encoding="utf-8")
+        # a held position so the exit is sized to it (stub the live account read)
+        self.addCleanup(setattr, pc, "_resolve_state", pc._resolve_state)
+        pc._resolve_state = lambda args, account_no: AccountState(
+            equity=Decimal("815535"), cash=Decimal("791335"), open_positions=1,
+            holdings=(HeldPosition("006840", 4, Decimal("22000")),))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = pc.main(["from-decision", "--records-dir", rec,
+                          "--snapshot", str(Path(snap, "forward-2026-07-20.json")),
+                          "--account-no", "12345678-01"])
+        self.assertEqual(rc, 0)
+        self.assertIn("SELL 006840", out.getvalue())
+        self.assertIn("full exit qty=4", out.getvalue())
+        self.assertIn("TTTC0011U", out.getvalue())  # sell TR id in the wire preview
 
     def test_from_decision_all_hold_orders_nothing(self):
         rec, snap = self._decision_dirs(

@@ -27,13 +27,27 @@ def load_record(path) -> dict:
     return record
 
 
-def admitted_buy_decisions(record: dict) -> tuple[dict, ...]:
-    """The AI's admitted BUY picks (action BUY and symbol in admitted_symbols)."""
+def _admitted(record: dict, actions: tuple[str, ...]) -> tuple[dict, ...]:
     admitted = set(record.get("admitted_symbols", ()))
     return tuple(
         d for d in record.get("decisions", ())
-        if d.get("action") == "BUY" and d.get("symbol") in admitted
+        if d.get("action") in actions and d.get("symbol") in admitted
     )
+
+
+def admitted_buy_decisions(record: dict) -> tuple[dict, ...]:
+    """The AI's admitted BUY picks (action BUY and symbol in admitted_symbols)."""
+    return _admitted(record, ("BUY",))
+
+
+def admitted_sell_decisions(record: dict) -> tuple[dict, ...]:
+    """The AI's admitted SELL exits (action SELL and symbol in admitted_symbols)."""
+    return _admitted(record, ("SELL",))
+
+
+def actionable_decisions(record: dict) -> tuple[dict, ...]:
+    """Everything the AI wants to trade now — admitted BUY entries and SELL exits (no HOLD)."""
+    return _admitted(record, ("BUY", "SELL"))
 
 
 def snapshot_close(snapshot_path, symbol: str) -> Decimal:

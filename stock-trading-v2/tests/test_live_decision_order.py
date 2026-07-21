@@ -7,7 +7,9 @@ from decimal import Decimal
 from pathlib import Path
 
 from swing_v2.live.decision_order import (
+    actionable_decisions,
     admitted_buy_decisions,
+    admitted_sell_decisions,
     latest_record_path,
     load_record,
     sized_quantity,
@@ -38,6 +40,15 @@ class RecordTests(unittest.TestCase):
     def test_all_hold_yields_no_buys(self):
         rec = _record(decisions=[{"action": "HOLD", "symbol": "105560", "target_weight": "0.18"}])
         self.assertEqual(admitted_buy_decisions(rec), ())
+
+    def test_sell_and_actionable(self):
+        rec = _record(decisions=[
+            {"action": "BUY", "symbol": "105560", "target_weight": "0.18"},
+            {"action": "SELL", "symbol": "086790", "target_weight": "0"},
+            {"action": "HOLD", "symbol": "000660", "target_weight": "0"}],
+            admitted_symbols=["105560", "086790", "000660"])
+        self.assertEqual([d["symbol"] for d in admitted_sell_decisions(rec)], ["086790"])
+        self.assertEqual([d["action"] for d in actionable_decisions(rec)], ["BUY", "SELL"])  # HOLD excluded
 
     def test_latest_record_and_load(self):
         with tempfile.TemporaryDirectory() as d:

@@ -102,6 +102,44 @@ def build_pilot_order(
     return PilotOrderPlan(intent=intent, snapshot=snapshot, limits=limits)
 
 
+def build_pilot_exit(
+    *,
+    symbol: str,
+    quantity: int,
+    limit_price: Decimal,
+    signal_date: date,
+    equity: Decimal,
+    open_positions: int,
+    classification: str = "STOCK",
+    strategy: str = "krx-swing-pilot",
+    strategy_version: str = "pilot-1",
+) -> PilotOrderPlan:
+    """Build a validated SELL exit. Unlike an entry, an exit REDUCES risk, so it must not
+    be blocked by the entry caps (positions / notional / daily-loss). The snapshot/limits
+    are therefore set so a legitimate full exit always validates: no new position risk,
+    the position count taken as post-exit, and the notional cap set to this order's own
+    notional. Safety for exits comes from kill-switch, market hours, audit, and holding
+    the shares — enforced by the caller and the submitter."""
+    if type(quantity) is not int or quantity <= 0:
+        raise ValueError("quantity must be a positive plain int")
+    _positive_decimal(limit_price, "limit_price")
+    _positive_decimal(equity, "equity")
+    if type(open_positions) is not int or open_positions <= 0:
+        raise ValueError("open_positions must be a positive plain int for an exit")
+    intent = LiveOrderIntent(
+        strategy=strategy, strategy_version=strategy_version, signal_date=signal_date,
+        symbol=symbol, classification=classification, side=Side.SELL, quantity=quantity,
+        limit_price=limit_price, order_mode=OrderMode.LIMIT,
+    )
+    snapshot = AccountRiskSnapshot(
+        planned_or_open_positions=max(0, open_positions - 1), equity=equity,
+        daily_loss=Decimal("0"), proposed_position_risk=Decimal("0"),
+    )
+    limits = PretradeLimits(max_positions=max(1, open_positions), max_order_notional=intent.notional)
+    validate_pretrade(intent, snapshot, limits=limits)
+    return PilotOrderPlan(intent=intent, snapshot=snapshot, limits=limits)
+
+
 def describe_pilot_plan(plan: PilotOrderPlan, *, account_number: str) -> str:
     """Render the exact wire body + TR id the submitter would send. Submits nothing."""
     if type(plan) is not PilotOrderPlan:

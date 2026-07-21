@@ -44,7 +44,7 @@ from .autonomous import (
 )
 from .daily_loss import DEFAULT_DAILY_LOSS_LEDGER, realized_loss_for, record_realized_trade
 from .decision_order import (
-    admitted_buy_decisions,
+    actionable_decisions,
     latest_record_path,
     load_record,
     sized_quantity,
@@ -70,6 +70,7 @@ from .kill_switch import (
 from .pilot import (
     PILOT_MAX_ORDER_NOTIONAL,
     PILOT_MAX_POSITIONS,
+    build_pilot_exit,
     build_pilot_order,
     describe_pilot_plan,
     submit_pilot_order,
@@ -346,21 +347,21 @@ def _run_from_decision(args, account_no: str) -> int:
         return 2
     record = load_record(record_path)
     signal_day = date.fromisoformat(record["signal_date"])
-    buys = admitted_buy_decisions(record)
-    if not buys:
-        sys.stdout.write(f"AI made no admitted BUY on {record['signal_date']} (e.g. all HOLD) — nothing to order.\n")
+    actionable = actionable_decisions(record)
+    if not actionable:
+        sys.stdout.write(f"AI made no admitted BUY/SELL on {record['signal_date']} (e.g. all HOLD) — nothing to order.\n")
         return 0
 
-    symbols = [d["symbol"] for d in buys]
+    labels = [f"{d['action']} {d['symbol']}" for d in actionable]
     if args.symbol is not None:
-        chosen = next((d for d in buys if d["symbol"] == args.symbol), None)
+        chosen = next((d for d in actionable if d["symbol"] == args.symbol), None)
         if chosen is None:
-            sys.stderr.write(f"--symbol {args.symbol} is not an AI BUY pick; choose from {symbols}\n")
+            sys.stderr.write(f"--symbol {args.symbol} is not an AI pick; choose from {labels}\n")
             return 2
-    elif len(buys) == 1:
-        chosen = buys[0]
+    elif len(actionable) == 1:
+        chosen = actionable[0]
     else:
-        sys.stderr.write(f"AI picked several BUYs {symbols}; pass --symbol to choose one\n")
+        sys.stderr.write(f"AI picked several trades {labels}; pass --symbol to choose one\n")
         return 2
 
     snapshot = args.snapshot or f"data/snapshots/forward-{record['signal_date']}.json"
@@ -369,7 +370,6 @@ def _run_from_decision(args, account_no: str) -> int:
     except (OSError, ValueError) as exc:
         sys.stderr.write(f"could not resolve a limit price ({exc}); pass --limit-price\n")
         return 2
-
     try:
         daily_loss = realized_loss_for(_daily_loss_ledger(args), signal_day.isoformat())
     except ValueError as exc:
@@ -377,34 +377,45 @@ def _run_from_decision(args, account_no: str) -> int:
         return 2
     state = _resolve_state(args, account_no)
 
-    quantity, clamped = sized_quantity(
-        target_weight=Decimal(str(chosen["target_weight"])), equity=state.equity,
-        limit_price=limit_price, max_order_notional=args.max_notional)
-    sys.stdout.write(
-        f"AI pick from {Path(record_path).name}: BUY {chosen['symbol']} "
-        f"target_weight={chosen['target_weight']} conviction={chosen.get('conviction')}\n"
-        f"sized qty={quantity} @ {limit_price}{' (CLAMPED to pilot cap)' if clamped else ''}\n"
-    )
-    if quantity < 1:
-        sys.stderr.write("sized quantity is below one share at this price/cap; nothing to order\n")
-        return 2
-
+    sell_avg_cost = None
     try:
-        plan = build_pilot_order(
-            symbol=chosen["symbol"], side=Side.BUY, quantity=quantity, limit_price=limit_price,
-            signal_date=signal_day, daily_loss=daily_loss, equity=state.equity,
-            open_positions=state.open_positions, max_order_notional=args.max_notional,
-            max_positions=args.max_positions,
-        )
+        if chosen["action"] == "SELL":
+            held = next((h for h in state.holdings if h.symbol == chosen["symbol"]), None)
+            if held is None or held.quantity < 1:
+                sys.stderr.write(f"AI says SELL {chosen['symbol']} but the account holds none; nothing to exit\n")
+                return 2
+            sell_avg_cost = held.avg_price
+            sys.stdout.write(
+                f"AI pick from {Path(record_path).name}: SELL {chosen['symbol']} "
+                f"conviction={chosen.get('conviction')} — full exit qty={held.quantity} @ {limit_price}\n")
+            plan = build_pilot_exit(symbol=chosen["symbol"], quantity=held.quantity, limit_price=limit_price,
+                                    signal_date=signal_day, equity=state.equity, open_positions=state.open_positions)
+        else:
+            quantity, clamped = sized_quantity(
+                target_weight=Decimal(str(chosen["target_weight"])), equity=state.equity,
+                limit_price=limit_price, max_order_notional=args.max_notional)
+            sys.stdout.write(
+                f"AI pick from {Path(record_path).name}: BUY {chosen['symbol']} "
+                f"target_weight={chosen['target_weight']} conviction={chosen.get('conviction')}\n"
+                f"sized qty={quantity} @ {limit_price}{' (CLAMPED to pilot cap)' if clamped else ''}\n")
+            if quantity < 1:
+                sys.stderr.write("sized quantity is below one share at this price/cap; nothing to order\n")
+                return 2
+            plan = build_pilot_order(
+                symbol=chosen["symbol"], side=Side.BUY, quantity=quantity, limit_price=limit_price,
+                signal_date=signal_day, daily_loss=daily_loss, equity=state.equity,
+                open_positions=state.open_positions, max_order_notional=args.max_notional,
+                max_positions=args.max_positions)
     except ValueError as exc:
         sys.stderr.write(f"pretrade REJECTED (nothing sent): {exc}\n")
         return 2
+
     if getattr(args, "autonomous", False):
-        return _submit_autonomous(args, plan, account_no)
-    return _present_and_submit(args, plan, account_no, submit_requested=bool(args.arm))
+        return _submit_autonomous(args, plan, account_no, sell_avg_cost=sell_avg_cost)
+    return _present_and_submit(args, plan, account_no, submit_requested=bool(args.arm), sell_avg_cost=sell_avg_cost)
 
 
-def _submit_autonomous(args, plan, account_no: str) -> int:
+def _submit_autonomous(args, plan, account_no: str, *, sell_avg_cost=None) -> int:
     """Unattended submit: no human confirm — a durable, expiring, budgeted authorization
     plus market-hours + kill-switch, all fail-closed, stand in for the human gate."""
     sys.stdout.write(describe_pilot_plan(plan, account_number=account_no))
@@ -430,7 +441,8 @@ def _submit_autonomous(args, plan, account_no: str) -> int:
         sys.stderr.write(f"REFUSING (autonomous): {exc}\n")
         return 2
     sys.stdout.write(f"autonomous authorized: order {orders_today + 1}, day-notional {notional_today}+{plan.notional}\n")
-    _place_order(args, plan, account_no, operator_confirmation=phrase, kill_switch_path=kill_switch)
+    ack = _place_order(args, plan, account_no, operator_confirmation=phrase, kill_switch_path=kill_switch)
+    _capture_sell_cost(args, plan, ack, sell_avg_cost)
     record_order(budget_dir, day=day, symbol=plan.intent.symbol, notional=plan.notional, at=now)
     return 0
 
